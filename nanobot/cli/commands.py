@@ -247,14 +247,13 @@ def gateway(
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose output"),
 ):
     """Start the nanobot gateway."""
-    from nanobot.agent.loop import AgentLoop
+    from nanobot.agent.pool import AgentPool
     from nanobot.bus.queue import MessageBus
     from nanobot.channels.manager import ChannelManager
     from nanobot.config.loader import get_data_dir, load_config
     from nanobot.cron.service import CronService
     from nanobot.cron.types import CronJob
     from nanobot.heartbeat.service import HeartbeatService
-    from nanobot.session.manager import SessionManager
 
     if verbose:
         import logging
@@ -265,38 +264,72 @@ def gateway(
     config = load_config()
     sync_workspace_templates(config.workspace_path)
     bus = MessageBus()
-    provider = _make_provider(config)
-    session_manager = SessionManager(config.workspace_path)
 
-    # Create cron service first (callback set after agent creation)
+    # Create provider factory for AgentPool
+    def provider_factory(model: str, provider_name: str | None):
+        """Create a provider for each agent."""
+        from nanobot.providers.custom_provider import CustomProvider
+        from nanobot.providers.litellm_provider import LiteLLMProvider
+        from nanobot.providers.openai_codex_provider import OpenAICodexProvider
+
+        # Determine provider name if not specified
+        if provider_name is None or provider_name == "auto":
+            provider_name = config.get_provider_name(model)
+
+        p = config.get_provider(model)
+
+        # OpenAI Codex (OAuth)
+        if provider_name == "openai_codex" or model.startswith("openai-codex/"):
+            return OpenAICodexProvider(default_model=model)
+
+        # Custom: direct OpenAI-compatible endpoint
+        if provider_name == "custom":
+            return CustomProvider(
+                api_key=p.api_key if p else "no-key",
+                api_base=config.get_api_base(model) or "http://localhost:8000/v1",
+                default_model=model,
+            )
+
+        from nanobot.providers.registry import find_by_name
+        spec = find_by_name(provider_name)
+        if not model.startswith("bedrock/") and not (p and p.api_key) and not (spec and spec.is_oauth):
+            console.print("[red]Error: No API key configured.[/red]")
+            console.print("Set one in ~/.nanobot/config.json under providers section")
+            raise typer.Exit(1)
+
+        return LiteLLMProvider(
+            api_key=p.api_key if p else None,
+            api_base=config.get_api_base(model),
+            default_model=model,
+            extra_headers=p.extra_headers if p else None,
+            provider_name=provider_name,
+        )
+
+    # Create cron service first (callback set after agent pool creation)
     cron_store_path = get_data_dir() / "cron" / "jobs.json"
     cron = CronService(cron_store_path)
 
-    # Create agent with cron service
-    agent = AgentLoop(
-        bus=bus,
-        provider=provider,
-        workspace=config.workspace_path,
-        model=config.agents.defaults.model,
-        temperature=config.agents.defaults.temperature,
-        max_tokens=config.agents.defaults.max_tokens,
-        max_iterations=config.agents.defaults.max_tool_iterations,
-        memory_window=config.agents.defaults.memory_window,
-        reasoning_effort=config.agents.defaults.reasoning_effort,
-        brave_api_key=config.tools.web.search.api_key or None,
-        web_proxy=config.tools.web.proxy or None,
-        exec_config=config.tools.exec,
-        cron_service=cron,
-        restrict_to_workspace=config.tools.restrict_to_workspace,
-        session_manager=session_manager,
-        mcp_servers=config.tools.mcp_servers,
-        channels_config=config.channels,
-    )
+    # Create agent pool
+    agent_pool = AgentPool(config, bus, provider_factory)
 
-    # Set cron callback (needs agent)
+    # Assign cron service to all agents
+    for agent in agent_pool._agents.values():
+        agent.cron_service = cron
+
+    # Set cron callback (uses default agent for backward compatibility)
     async def on_cron_job(job: CronJob) -> str | None:
         """Execute a cron job through the agent."""
         from nanobot.agent.tools.message import MessageTool
+
+        # Get default agent or first available agent
+        agent = agent_pool.get_default_agent()
+        if agent is None and agent_pool._agents:
+            agent = next(iter(agent_pool._agents.values()))
+
+        if agent is None:
+            console.print("[red]Error: No agent available for cron job[/red]")
+            return None
+
         reminder_note = (
             "[Scheduled Task] Timer finished.\n\n"
             f"Task '{job.name}' has been triggered.\n"
@@ -324,12 +357,23 @@ def gateway(
         return response
     cron.on_job = on_cron_job
 
-    # Create channel manager
-    channels = ChannelManager(config, bus)
+    # Create channel manager with agent pool
+    channels = ChannelManager(config, bus, agent_pool)
 
     def _pick_heartbeat_target() -> tuple[str, str]:
         """Pick a routable channel/chat target for heartbeat-triggered messages."""
+        from nanobot.session.manager import SessionManager
+
         enabled = set(channels.enabled_channels)
+        # Get default agent or first available agent for session manager
+        agent = agent_pool.get_default_agent()
+        if agent is None and agent_pool._agents:
+            agent = next(iter(agent_pool._agents.values()))
+
+        if agent is None:
+            return "cli", "direct"
+
+        session_manager = agent.session_manager
         # Prefer the most recently updated non-internal session on an enabled channel.
         for item in session_manager.list_sessions():
             key = item.get("key") or ""
@@ -347,6 +391,14 @@ def gateway(
     async def on_heartbeat_execute(tasks: str) -> str:
         """Phase 2: execute heartbeat tasks through the full agent loop."""
         channel, chat_id = _pick_heartbeat_target()
+
+        # Get default agent or first available agent
+        agent = agent_pool.get_default_agent()
+        if agent is None and agent_pool._agents:
+            agent = next(iter(agent_pool._agents.values()))
+
+        if agent is None:
+            return ""
 
         async def _silent(*_args, **_kwargs):
             pass
@@ -367,11 +419,16 @@ def gateway(
             return  # No external channel available to deliver to
         await bus.publish_outbound(OutboundMessage(channel=channel, chat_id=chat_id, content=response))
 
+    # Get default agent or first available for heartbeat service
+    default_agent = agent_pool.get_default_agent()
+    if default_agent is None and agent_pool._agents:
+        default_agent = next(iter(agent_pool._agents.values()))
+
     hb_cfg = config.gateway.heartbeat
     heartbeat = HeartbeatService(
         workspace=config.workspace_path,
-        provider=provider,
-        model=agent.model,
+        provider=default_agent.provider if default_agent else provider_factory(config.agents.defaults.model, None),
+        model=default_agent.model if default_agent else config.agents.defaults.model,
         on_execute=on_heartbeat_execute,
         on_notify=on_heartbeat_notify,
         interval_s=hb_cfg.interval_s,
@@ -393,17 +450,21 @@ def gateway(
         try:
             await cron.start()
             await heartbeat.start()
+            # Run all agents in the pool
+            agent_tasks = [agent.run() for agent in agent_pool._agents.values()]
             await asyncio.gather(
-                agent.run(),
+                *agent_tasks,
                 channels.start_all(),
             )
         except KeyboardInterrupt:
             console.print("\nShutting down...")
         finally:
-            await agent.close_mcp()
+            # Close MCP for all agents
+            for agent in agent_pool._agents.values():
+                await agent.close_mcp()
+                agent.stop()
             heartbeat.stop()
             cron.stop()
-            agent.stop()
             await channels.stop_all()
 
     asyncio.run(run())

@@ -1,9 +1,11 @@
 """Configuration schema using Pydantic."""
 
-from pathlib import Path
-from typing import Literal
+from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, Field
+from pathlib import Path
+from typing import Literal, Sequence
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from pydantic.alias_generators import to_camel
 from pydantic_settings import BaseSettings
 
@@ -33,6 +35,14 @@ class TelegramConfig(Base):
     reply_to_message: bool = False  # If true, bot replies quote the original message
 
 
+class FeishuAccountConfig(Base):
+    """Feishu app account configuration."""
+
+    name: str
+    app_id: str
+    app_secret: str
+
+
 class FeishuConfig(Base):
     """Feishu/Lark channel configuration using WebSocket long connection."""
 
@@ -43,6 +53,7 @@ class FeishuConfig(Base):
     verification_token: str = ""  # Verification Token for event subscription (optional)
     allow_from: list[str] = Field(default_factory=list)  # Allowed user open_ids
     react_emoji: str = "THUMBSUP"  # Emoji type for message reactions (e.g. THUMBSUP, OK, DONE, SMILE)
+    accounts: dict[str, FeishuAccountConfig] = Field(default_factory=dict)  # Multi-account support
 
 
 class DingTalkConfig(Base):
@@ -62,23 +73,6 @@ class DiscordConfig(Base):
     allow_from: list[str] = Field(default_factory=list)  # Allowed user IDs
     gateway_url: str = "wss://gateway.discord.gg/?v=10&encoding=json"
     intents: int = 37377  # GUILDS + GUILD_MESSAGES + DIRECT_MESSAGES + MESSAGE_CONTENT
-
-
-class MatrixConfig(Base):
-    """Matrix (Element) channel configuration."""
-
-    enabled: bool = False
-    homeserver: str = "https://matrix.org"
-    access_token: str = ""
-    user_id: str = ""  # @bot:matrix.org
-    device_id: str = ""
-    e2ee_enabled: bool = True # Enable Matrix E2EE support (encryption + encrypted room handling).
-    sync_stop_grace_seconds: int = 2 # Max seconds to wait for sync_forever to stop gracefully before cancellation fallback.
-    max_media_bytes: int = 20 * 1024 * 1024 # Max attachment size accepted for Matrix media handling (inbound + outbound).
-    allow_from: list[str] = Field(default_factory=list)
-    group_policy: Literal["open", "mention", "allowlist"] = "open"
-    group_allow_from: list[str] = Field(default_factory=list)
-    allow_room_mentions: bool = False
 
 
 class EmailConfig(Base):
@@ -230,10 +224,26 @@ class AgentDefaults(Base):
     reasoning_effort: str | None = None  # low / medium / high — enables LLM thinking mode
 
 
+class AgentConfig(Base):
+    """Individual agent configuration."""
+
+    id: str
+    name: str
+    model: str | None = None
+    provider: str | None = None
+    workspace: str | None = None
+    temperature: float | None = None
+    max_tokens: int | None = None
+    max_tool_iterations: int | None = None
+    memory_window: int | None = None
+    reasoning_effort: str | None = None
+
+
 class AgentsConfig(Base):
     """Agent configuration."""
 
     defaults: AgentDefaults = Field(default_factory=AgentDefaults)
+    list: Sequence[AgentConfig] = Field(default_factory=list)
 
 
 class ProviderConfig(Base):
@@ -322,6 +332,20 @@ class ToolsConfig(Base):
     mcp_servers: dict[str, MCPServerConfig] = Field(default_factory=dict)
 
 
+class BindingConfig(Base):
+    """Binding configuration for agent-channel-account mapping."""
+
+    agent_id: str = Field(alias="agentId")
+    match: dict[str, str]
+
+    @field_validator("match")
+    @classmethod
+    def validate_match(cls, v: dict[str, str]) -> dict[str, str]:
+        if "channel" not in v or "accountId" not in v:
+            raise ValueError("match must contain 'channel' and 'accountId' keys")
+        return v
+
+
 class Config(BaseSettings):
     """Root configuration for nanobot."""
 
@@ -330,6 +354,7 @@ class Config(BaseSettings):
     providers: ProvidersConfig = Field(default_factory=ProvidersConfig)
     gateway: GatewayConfig = Field(default_factory=GatewayConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
+    bindings: list[BindingConfig] = Field(default_factory=list)
 
     @property
     def workspace_path(self) -> Path:

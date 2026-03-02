@@ -5,6 +5,7 @@ import json
 import os
 import re
 import threading
+import time
 from collections import OrderedDict
 from pathlib import Path
 from typing import Any
@@ -27,6 +28,7 @@ try:
         CreateMessageReactionRequestBody,
         CreateMessageRequest,
         CreateMessageRequestBody,
+        DeleteMessageReactionRequest,
         Emoji,
         GetMessageResourceRequest,
         P2ImMessageReceiveV1,
@@ -238,14 +240,6 @@ def _extract_post_content(content_json: dict) -> tuple[str, list[str]]:
     return "", []
 
 
-def _extract_post_text(content_json: dict) -> str:
-    """Extract plain text from Feishu post (rich text) message content.
-
-    Legacy wrapper for _extract_post_content, returns only text.
-    """
-    text, _ = _extract_post_content(content_json)
-    return text
-
 
 class FeishuChannel(BaseChannel):
     """
@@ -261,14 +255,44 @@ class FeishuChannel(BaseChannel):
 
     name = "feishu"
 
-    def __init__(self, config: FeishuConfig, bus: MessageBus):
+    def __init__(self, config: FeishuConfig, bus: MessageBus, agent_pool: Any = None):
         super().__init__(config, bus)
         self.config: FeishuConfig = config
+        self.agent_pool = agent_pool
         self._client: Any = None
         self._ws_client: Any = None
         self._ws_thread: threading.Thread | None = None
+        self._clients: dict[str, Any] = {}
+        self._ws_clients: dict[str, Any] = {}
+        self._ws_threads: dict[str, threading.Thread] = {}
+        self._app_id_to_account: dict[str, str] = {}
         self._processed_message_ids: OrderedDict[str, None] = OrderedDict()  # Ordered dedup cache
         self._loop: asyncio.AbstractEventLoop | None = None
+
+    def _get_accounts(self) -> dict[str, dict[str, str]]:
+        """Get accounts dict with backward compatibility.
+
+        Returns dict[accountId, {app_id, app_secret}].
+        If config.accounts is empty, use legacy appId/appSecret as "default" account.
+        """
+        if self.config.accounts:
+            return {
+                account_id: {
+                    "app_id": account.app_id,
+                    "app_secret": account.app_secret,
+                }
+                for account_id, account in self.config.accounts.items()
+            }
+        return {
+            "default": {
+                "app_id": self.config.app_id,
+                "app_secret": self.config.app_secret,
+            }
+        }
+
+    def _identify_account(self, app_id: str) -> str | None:
+        """Map appId to accountId using the internal mapping."""
+        return self._app_id_to_account.get(app_id)
 
     async def start(self) -> None:
         """Start the Feishu bot with WebSocket long connection."""
@@ -276,52 +300,62 @@ class FeishuChannel(BaseChannel):
             logger.error("Feishu SDK not installed. Run: pip install lark-oapi")
             return
 
-        if not self.config.app_id or not self.config.app_secret:
-            logger.error("Feishu app_id and app_secret not configured")
+        accounts = self._get_accounts()
+        if not accounts:
+            logger.error("No Feishu accounts configured")
             return
 
         self._running = True
         self._loop = asyncio.get_running_loop()
 
-        # Create Lark client for sending messages
-        self._client = lark.Client.builder() \
-            .app_id(self.config.app_id) \
-            .app_secret(self.config.app_secret) \
-            .log_level(lark.LogLevel.INFO) \
-            .build()
+        # Create clients and WebSocket connections for each account
+        for account_id, account_info in accounts.items():
+            app_id = account_info["app_id"]
+            app_secret = account_info["app_secret"]
 
-        # Create event handler (only register message receive, ignore other events)
-        event_handler = lark.EventDispatcherHandler.builder(
-            self.config.encrypt_key or "",
-            self.config.verification_token or "",
-        ).register_p2_im_message_receive_v1(
-            self._on_message_sync
-        ).build()
+            # Create Lark client for sending messages
+            client = lark.Client.builder() \
+                .app_id(app_id) \
+                .app_secret(app_secret) \
+                .log_level(lark.LogLevel.INFO) \
+                .build()
+            self._clients[account_id] = client
 
-        # Create WebSocket client for long connection
-        self._ws_client = lark.ws.Client(
-            self.config.app_id,
-            self.config.app_secret,
-            event_handler=event_handler,
-            log_level=lark.LogLevel.INFO
-        )
+            # Create event handler
+            event_handler = lark.EventDispatcherHandler.builder(
+                self.config.encrypt_key or "",
+                self.config.verification_token or "",
+            ).register_p2_im_message_receive_v1(
+                lambda data, aid=account_id: self._on_message_sync(data, aid)
+            ).build()
 
-        # Start WebSocket client in a separate thread with reconnect loop
-        def run_ws():
-            while self._running:
-                try:
-                    self._ws_client.start()
-                except Exception as e:
-                    logger.warning("Feishu WebSocket error: {}", e)
-                if self._running:
-                    import time
-                    time.sleep(5)
+            # Create WebSocket client
+            ws_client = lark.ws.Client(
+                app_id,
+                app_secret,
+                event_handler=event_handler,
+                log_level=lark.LogLevel.INFO
+            )
+            self._ws_clients[account_id] = ws_client
 
-        self._ws_thread = threading.Thread(target=run_ws, daemon=True)
-        self._ws_thread.start()
+            # Start WebSocket in thread
+            def run_ws(ws_client=ws_client, aid=account_id):
+                while self._running:
+                    try:
+                        ws_client.start()
+                    except Exception as e:
+                        logger.warning("Feishu WebSocket error ({}): {}", aid, e)
+                    if self._running:
+                        time.sleep(5)
 
-        logger.info("Feishu bot started with WebSocket long connection")
-        logger.info("No public IP required - using WebSocket to receive events")
+            ws_thread = threading.Thread(target=run_ws, daemon=True)
+            ws_thread.start()
+            self._ws_threads[account_id] = ws_thread
+
+            # Build reverse mapping
+            self._app_id_to_account[app_id] = account_id
+
+        logger.info("Feishu bot started with {} account(s)", len(accounts))
 
         # Keep running until stopped
         while self._running:
@@ -338,9 +372,14 @@ class FeishuChannel(BaseChannel):
         self._running = False
         logger.info("Feishu bot stopped")
 
-    def _add_reaction_sync(self, message_id: str, emoji_type: str) -> None:
-        """Sync helper for adding reaction (runs in thread pool)."""
+    def _add_reaction_sync(self, message_id: str, emoji_type: str, client=None) -> str | None:
+        """Sync helper for adding reaction (runs in thread pool). Returns reaction_id."""
         try:
+            # Use provided client or fallback to legacy _client
+            c = client or self._client
+            if not c:
+                return None
+
             request = CreateMessageReactionRequest.builder() \
                 .message_id(message_id) \
                 .request_body(
@@ -349,26 +388,68 @@ class FeishuChannel(BaseChannel):
                     .build()
                 ).build()
 
-            response = self._client.im.v1.message_reaction.create(request)
+            response = c.im.v1.message_reaction.create(request)
 
             if not response.success():
                 logger.warning("Failed to add reaction: code={}, msg={}", response.code, response.msg)
+                return None
             else:
-                logger.debug("Added {} reaction to message {}", emoji_type, message_id)
+                reaction_id = response.data.reaction_id if response.data else None
+                logger.debug("Added {} reaction to message {}, reaction_id={}", emoji_type, message_id, reaction_id)
+                return reaction_id
         except Exception as e:
             logger.warning("Error adding reaction: {}", e)
+            return None
 
-    async def _add_reaction(self, message_id: str, emoji_type: str = "THUMBSUP") -> None:
+    def _delete_reaction_sync(self, message_id: str, reaction_id: str, client=None) -> None:
+        """Sync helper for deleting a reaction (runs in thread pool)."""
+        try:
+            c = client or self._client
+            if not c:
+                return
+
+            request = DeleteMessageReactionRequest.builder() \
+                .message_id(message_id) \
+                .reaction_id(reaction_id) \
+                .build()
+
+            response = c.im.v1.message_reaction.delete(request)
+
+            if not response.success():
+                logger.warning("Failed to delete reaction: code={}, msg={}", response.code, response.msg)
+            else:
+                logger.debug("Deleted reaction {} from message {}", reaction_id, message_id)
+        except Exception as e:
+            logger.warning("Error deleting reaction: {}", e)
+
+    async def _add_reaction(self, message_id: str, emoji_type: str = "THUMBSUP", account_id: str = None) -> str | None:
         """
-        Add a reaction emoji to a message (non-blocking).
+        Add a reaction emoji to a message (non-blocking). Returns reaction_id.
 
         Common emoji types: THUMBSUP, OK, EYES, DONE, OnIt, HEART
         """
-        if not self._client or not Emoji:
+        if not Emoji:
+            return None
+
+        # Get client for account
+        client = self._clients.get(account_id) if account_id and self._clients else self._client
+        if not client:
+            return None
+
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, self._add_reaction_sync, message_id, emoji_type, client)
+
+    async def _delete_reaction(self, message_id: str, reaction_id: str, account_id: str = None) -> None:
+        """Delete a reaction from a message (non-blocking)."""
+        if not Emoji:
+            return
+
+        client = self._clients.get(account_id) if account_id and self._clients else self._client
+        if not client:
             return
 
         loop = asyncio.get_running_loop()
-        await loop.run_in_executor(None, self._add_reaction_sync, message_id, emoji_type)
+        await loop.run_in_executor(None, self._delete_reaction_sync, message_id, reaction_id, client)
 
     # Regex to match markdown tables (header + separator + data rows)
     _TABLE_RE = re.compile(
@@ -454,8 +535,10 @@ class FeishuChannel(BaseChannel):
         ".xls": "xls", ".xlsx": "xls", ".ppt": "ppt", ".pptx": "ppt",
     }
 
-    def _upload_image_sync(self, file_path: str) -> str | None:
+    def _upload_image_sync(self, file_path: str, client: Any = None) -> str | None:
         """Upload an image to Feishu and return the image_key."""
+        if not client:
+            client = self._client
         try:
             with open(file_path, "rb") as f:
                 request = CreateImageRequest.builder() \
@@ -465,7 +548,7 @@ class FeishuChannel(BaseChannel):
                         .image(f)
                         .build()
                     ).build()
-                response = self._client.im.v1.image.create(request)
+                response = client.im.v1.image.create(request)
                 if response.success():
                     image_key = response.data.image_key
                     logger.debug("Uploaded image {}: {}", os.path.basename(file_path), image_key)
@@ -477,8 +560,10 @@ class FeishuChannel(BaseChannel):
             logger.error("Error uploading image {}: {}", file_path, e)
             return None
 
-    def _upload_file_sync(self, file_path: str) -> str | None:
+    def _upload_file_sync(self, file_path: str, client: Any = None) -> str | None:
         """Upload a file to Feishu and return the file_key."""
+        if not client:
+            client = self._client
         ext = os.path.splitext(file_path)[1].lower()
         file_type = self._FILE_TYPE_MAP.get(ext, "stream")
         file_name = os.path.basename(file_path)
@@ -492,7 +577,7 @@ class FeishuChannel(BaseChannel):
                         .file(f)
                         .build()
                     ).build()
-                response = self._client.im.v1.file.create(request)
+                response = client.im.v1.file.create(request)
                 if response.success():
                     file_key = response.data.file_key
                     logger.debug("Uploaded file {}: {}", file_name, file_key)
@@ -596,8 +681,10 @@ class FeishuChannel(BaseChannel):
 
         return None, f"[{msg_type}: download failed]"
 
-    def _send_message_sync(self, receive_id_type: str, receive_id: str, msg_type: str, content: str) -> bool:
+    def _send_message_sync(self, receive_id_type: str, receive_id: str, msg_type: str, content: str, client: Any = None) -> bool:
         """Send a single message (text/image/file/interactive) synchronously."""
+        if not client:
+            client = self._client
         try:
             request = CreateMessageRequest.builder() \
                 .receive_id_type(receive_id_type) \
@@ -608,7 +695,7 @@ class FeishuChannel(BaseChannel):
                     .content(content)
                     .build()
                 ).build()
-            response = self._client.im.v1.message.create(request)
+            response = client.im.v1.message.create(request)
             if not response.success():
                 logger.error(
                     "Failed to send Feishu {} message: code={}, msg={}, log_id={}",
@@ -623,7 +710,14 @@ class FeishuChannel(BaseChannel):
 
     async def send(self, msg: OutboundMessage) -> None:
         """Send a message through Feishu, including media (images/files) if present."""
-        if not self._client:
+        # Skip progress messages for reaction management
+        is_progress = msg.metadata.get("_progress") if msg.metadata else False
+
+        # Get client for account (backward compat: use _client if _clients empty)
+        account_id = msg.metadata.get("account_id") if msg.metadata else None
+        client = self._clients.get(account_id) if account_id and self._clients else (self._clients.get(next(iter(self._clients))) if self._clients else self._client)
+
+        if not client:
             logger.warning("Feishu client not initialized")
             return
 
@@ -637,40 +731,47 @@ class FeishuChannel(BaseChannel):
                     continue
                 ext = os.path.splitext(file_path)[1].lower()
                 if ext in self._IMAGE_EXTS:
-                    key = await loop.run_in_executor(None, self._upload_image_sync, file_path)
+                    key = await loop.run_in_executor(None, self._upload_image_sync, file_path, client)
                     if key:
                         await loop.run_in_executor(
                             None, self._send_message_sync,
-                            receive_id_type, msg.chat_id, "image", json.dumps({"image_key": key}, ensure_ascii=False),
+                            receive_id_type, msg.chat_id, "image", json.dumps({"image_key": key}, ensure_ascii=False), client,
                         )
                 else:
-                    key = await loop.run_in_executor(None, self._upload_file_sync, file_path)
+                    key = await loop.run_in_executor(None, self._upload_file_sync, file_path, client)
                     if key:
                         media_type = "audio" if ext in self._AUDIO_EXTS else "file"
                         await loop.run_in_executor(
                             None, self._send_message_sync,
-                            receive_id_type, msg.chat_id, media_type, json.dumps({"file_key": key}, ensure_ascii=False),
+                            receive_id_type, msg.chat_id, media_type, json.dumps({"file_key": key}, ensure_ascii=False), client,
                         )
 
             if msg.content and msg.content.strip():
                 card = {"config": {"wide_screen_mode": True}, "elements": self._build_card_elements(msg.content)}
                 await loop.run_in_executor(
                     None, self._send_message_sync,
-                    receive_id_type, msg.chat_id, "interactive", json.dumps(card, ensure_ascii=False),
+                    receive_id_type, msg.chat_id, "interactive", json.dumps(card, ensure_ascii=False), client,
                 )
+
+            # Delete the "thinking" reaction after final reply (not on progress messages)
+            if not is_progress and msg.metadata:
+                orig_message_id = msg.metadata.get("message_id")
+                reaction_id = msg.metadata.get("reaction_id")
+                if orig_message_id and reaction_id:
+                    await self._delete_reaction(orig_message_id, reaction_id, account_id)
 
         except Exception as e:
             logger.error("Error sending Feishu message: {}", e)
 
-    def _on_message_sync(self, data: "P2ImMessageReceiveV1") -> None:
+    def _on_message_sync(self, data: "P2ImMessageReceiveV1", account_id: str) -> None:
         """
         Sync handler for incoming messages (called from WebSocket thread).
         Schedules async handling in the main event loop.
         """
         if self._loop and self._loop.is_running():
-            asyncio.run_coroutine_threadsafe(self._on_message(data), self._loop)
+            asyncio.run_coroutine_threadsafe(self._on_message(data, account_id), self._loop)
 
-    async def _on_message(self, data: "P2ImMessageReceiveV1") -> None:
+    async def _on_message(self, data: "P2ImMessageReceiveV1", account_id: str) -> None:
         """Handle incoming message from Feishu."""
         try:
             event = data.event
@@ -691,13 +792,20 @@ class FeishuChannel(BaseChannel):
             if sender.sender_type == "bot":
                 return
 
+            # Route to agent via AgentPool
+            if self.agent_pool:
+                agent = self.agent_pool.get_agent("feishu", account_id)
+                if not agent:
+                    logger.warning("No agent found for feishu account {}", account_id)
+                    return
+
             sender_id = sender.sender_id.open_id if sender.sender_id else "unknown"
             chat_id = message.chat_id
             chat_type = message.chat_type
             msg_type = message.message_type
 
-            # Add reaction
-            await self._add_reaction(message_id, self.config.react_emoji)
+            # Add reaction and track reaction_id for later removal
+            reaction_id = await self._add_reaction(message_id, self.config.react_emoji, account_id)
 
             # Parse content
             content_parts = []
@@ -755,8 +863,10 @@ class FeishuChannel(BaseChannel):
                 media=media_paths,
                 metadata={
                     "message_id": message_id,
+                    "reaction_id": reaction_id,
                     "chat_type": chat_type,
                     "msg_type": msg_type,
+                    "account_id": account_id,
                 }
             )
 

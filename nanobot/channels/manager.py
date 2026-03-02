@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
@@ -11,6 +11,9 @@ from nanobot.bus.events import OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.channels.base import BaseChannel
 from nanobot.config.schema import Config
+
+if TYPE_CHECKING:
+    from nanobot.agent.pool import AgentPool
 
 
 class ChannelManager:
@@ -23,9 +26,10 @@ class ChannelManager:
     - Route outbound messages
     """
 
-    def __init__(self, config: Config, bus: MessageBus):
+    def __init__(self, config: Config, bus: MessageBus, agent_pool: Any = None):
         self.config = config
         self.bus = bus
+        self.agent_pool = agent_pool
         self.channels: dict[str, BaseChannel] = {}
         self._dispatch_task: asyncio.Task | None = None
 
@@ -74,7 +78,7 @@ class ChannelManager:
             try:
                 from nanobot.channels.feishu import FeishuChannel
                 self.channels["feishu"] = FeishuChannel(
-                    self.config.channels.feishu, self.bus
+                    self.config.channels.feishu, self.bus, self.agent_pool
                 )
                 logger.info("Feishu channel enabled")
             except ImportError as e:
