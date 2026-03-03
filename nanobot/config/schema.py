@@ -43,6 +43,16 @@ class FeishuAccountConfig(Base):
     app_secret: str
 
 
+class FeishuToolsConfig(Base):
+    """Feishu tools enable/disable switches."""
+
+    doc: bool = True
+    wiki: bool = True
+    drive: bool = True
+    bitable: bool = True
+    task: bool = True
+
+
 class FeishuConfig(Base):
     """Feishu/Lark channel configuration using WebSocket long connection."""
 
@@ -52,6 +62,10 @@ class FeishuConfig(Base):
     encrypt_key: str = ""  # Encrypt Key for event subscription (optional)
     verification_token: str = ""  # Verification Token for event subscription (optional)
     allow_from: list[str] = Field(default_factory=list)  # Allowed user open_ids
+    group_allow_from: list[str] = Field(default_factory=list)  # Allowed group chat_ids (oc_xxx)
+    require_mention: bool = True   # Group messages require @bot mention
+    render_mode: str = "card"      # "auto" | "raw" | "card"
+    tools: FeishuToolsConfig = Field(default_factory=FeishuToolsConfig)
     react_emoji: str = "THUMBSUP"  # Emoji type for message reactions (e.g. THUMBSUP, OK, DONE, SMILE)
     accounts: dict[str, FeishuAccountConfig] = Field(default_factory=dict)  # Multi-account support
 
