@@ -5,7 +5,10 @@ import os
 import select
 import signal
 import sys
+import warnings
 from pathlib import Path
+
+warnings.filterwarnings("ignore", category=Warning, module="requests")
 
 import typer
 from prompt_toolkit import PromptSession
