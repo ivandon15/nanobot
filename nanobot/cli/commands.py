@@ -322,6 +322,7 @@ def gateway(
     # Set cron callback (uses default agent for backward compatibility)
     async def on_cron_job(job: CronJob) -> str | None:
         """Execute a cron job through the agent."""
+        from nanobot.agent.tools.cron import CronTool
         from nanobot.agent.tools.message import MessageTool
 
         # Get default agent or first available agent
@@ -339,12 +340,21 @@ def gateway(
             f"Scheduled instruction: {job.payload.message}"
         )
 
-        response = await agent.process_direct(
-            reminder_note,
-            session_key=f"cron:{job.id}",
-            channel=job.payload.channel or "cli",
-            chat_id=job.payload.to or "direct",
-        )
+        # Prevent the agent from scheduling new cron jobs during execution
+        cron_tool = agent.tools.get("cron")
+        cron_token = None
+        if isinstance(cron_tool, CronTool):
+            cron_token = cron_tool.set_cron_context(True)
+        try:
+            response = await agent.process_direct(
+                reminder_note,
+                session_key=f"cron:{job.id}",
+                channel=job.payload.channel or "cli",
+                chat_id=job.payload.to or "direct",
+            )
+        finally:
+            if isinstance(cron_tool, CronTool) and cron_token is not None:
+                cron_tool.reset_cron_context(cron_token)
 
         message_tool = agent.tools.get("message")
         if isinstance(message_tool, MessageTool) and message_tool._sent_in_turn:
