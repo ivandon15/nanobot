@@ -552,6 +552,8 @@ def agent(
             with _thinking_ctx():
                 response = await agent_loop.process_direct(message, session_id, on_progress=_cli_progress)
             _print_agent_response(response, render_markdown=markdown)
+            if agent_loop._consolidation_tasks:
+                await asyncio.gather(*agent_loop._consolidation_tasks, return_exceptions=True)
             await agent_loop.close_mcp()
 
         asyncio.run(run_once())
