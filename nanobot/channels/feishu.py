@@ -12,6 +12,11 @@ from typing import Any
 
 from loguru import logger
 
+try:
+    import requests as _requests
+except ImportError:
+    _requests = None  # type: ignore
+
 from nanobot.bus.events import OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.channels.base import BaseChannel
@@ -268,6 +273,7 @@ class FeishuChannel(BaseChannel):
         self._app_id_to_account: dict[str, str] = {}
         self._processed_message_ids: OrderedDict[str, None] = OrderedDict()  # Ordered dedup cache
         self._loop: asyncio.AbstractEventLoop | None = None
+        self._bot_open_ids: dict[str, str] = {}  # account_id -> bot open_id
 
     def _get_accounts(self) -> dict[str, dict[str, str]]:
         """Get accounts dict with backward compatibility.
@@ -321,6 +327,13 @@ class FeishuChannel(BaseChannel):
                 .build()
             self._clients[account_id] = client
 
+            # Fetch bot open_id for mention detection
+            loop = asyncio.get_running_loop()
+            open_id = await loop.run_in_executor(None, self._fetch_bot_open_id_sync, client)
+            if open_id:
+                self._bot_open_ids[account_id] = open_id
+                logger.info("Feishu bot open_id for {}: {}", account_id, open_id)
+
             # Create event handler
             event_handler = lark.EventDispatcherHandler.builder(
                 self.config.encrypt_key or "",
@@ -371,6 +384,32 @@ class FeishuChannel(BaseChannel):
         """
         self._running = False
         logger.info("Feishu bot stopped")
+
+    def _fetch_bot_open_id_sync(self, client: Any) -> str | None:
+        """Fetch this bot's own open_id via /open-apis/bot/v3/info."""
+        try:
+            cfg = client.config
+            token_resp = _requests.post(
+                "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal",
+                json={"app_id": cfg.app_id, "app_secret": cfg.app_secret},
+                timeout=10,
+            )
+            token_data = token_resp.json()
+            token = token_data.get("tenant_access_token")
+            if not token:
+                return None
+            bot_resp = _requests.get(
+                "https://open.feishu.cn/open-apis/bot/v3/info",
+                headers={"Authorization": f"Bearer {token}"},
+                timeout=10,
+            )
+            data = bot_resp.json()
+            if data.get("code") == 0:
+                return data.get("bot", {}).get("open_id")
+            return None
+        except Exception as e:
+            logger.warning("Failed to fetch bot open_id: {}", e)
+            return None
 
     def _add_reaction_sync(self, message_id: str, emoji_type: str, client=None) -> str | None:
         """Sync helper for adding reaction (runs in thread pool). Returns reaction_id."""
