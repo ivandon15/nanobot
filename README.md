@@ -1036,10 +1036,11 @@ OpenViking gives the agent long-term memory: it stores every conversation, extra
 
 ### Prerequisites
 
-Install OpenViking (not yet on PyPI — install from source):
+Install OpenViking (not yet on PyPI — install from source). It requires Go to compile the AGFS storage backend:
 
 ```bash
-pip install -e /path/to/OpenViking   # or: pip install nanobot-ai[openviking]
+brew install go                          # macOS; skip if Go ≥ 1.25 already installed
+pip install -e /path/to/OpenViking
 ```
 
 ### Step 1 — Create `~/.openviking/ov.conf`
