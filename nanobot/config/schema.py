@@ -236,6 +236,9 @@ class AgentDefaults(Base):
     max_tool_iterations: int = 40
     memory_window: int = 100
     reasoning_effort: str | None = None  # low / medium / high — enables LLM thinking mode
+    model_fallbacks: list[str] = Field(default_factory=list)
+    image_model: str | None = None
+    image_model_fallbacks: list[str] = Field(default_factory=list)
 
 
 class AgentConfig(Base):
@@ -251,6 +254,9 @@ class AgentConfig(Base):
     max_tool_iterations: int | None = None
     memory_window: int | None = None
     reasoning_effort: str | None = None
+    model_fallbacks: list[str] | None = None
+    image_model: str | None = None
+    image_model_fallbacks: list[str] | None = None
 
 
 class AgentsConfig(Base):
