@@ -167,3 +167,40 @@ async def test_feishu_drive_list_files_calls_api():
     assert "fldABC" in result
 
 
+# Task 10: feishu_task tests
+def test_feishu_task_tool_name():
+    from nanobot.agent.tools.feishu.task import FeishuTaskTool
+    tool = FeishuTaskTool(FeishuConfig(enabled=True, app_id="a", app_secret="b"))
+    assert tool.name == "feishu_task"
+
+
+def test_feishu_task_tool_has_required_params():
+    from nanobot.agent.tools.feishu.task import FeishuTaskTool
+    tool = FeishuTaskTool(FeishuConfig(enabled=True, app_id="a", app_secret="b"))
+    props = tool.parameters["properties"]
+    assert "action" in props
+
+
+@pytest.mark.asyncio
+async def test_feishu_task_list_calls_api():
+    from unittest.mock import MagicMock, patch
+    from nanobot.agent.tools.feishu.task import FeishuTaskTool
+
+    tool = FeishuTaskTool(FeishuConfig(enabled=True, app_id="a", app_secret="b"))
+    mock_client = MagicMock()
+    mock_resp = MagicMock()
+    mock_resp.success.return_value = True
+    mock_task = MagicMock()
+    mock_task.guid = "task_guid_123"
+    mock_task.summary = "Fix the bug"
+    mock_task.completed_at = ""
+    mock_resp.data.items = [mock_task]
+    mock_resp.data.page_token = ""
+    mock_client.task.v2.task.list.return_value = mock_resp
+
+    with patch("nanobot.agent.tools.feishu.task.get_feishu_client", return_value=mock_client):
+        result = await tool.execute(action="list_tasks")
+    assert "task_guid_123" in result
+
+
+
