@@ -203,4 +203,40 @@ async def test_feishu_task_list_calls_api():
     assert "task_guid_123" in result
 
 
+# Task 11: AgentLoop registration tests
+def test_feishu_tools_registered_when_feishu_enabled():
+    from unittest.mock import MagicMock, patch
+    from nanobot.agent.tools.feishu import register_feishu_tools
+    from nanobot.agent.tools.registry import ToolRegistry
+    from nanobot.config.schema import FeishuConfig
+
+    cfg = FeishuConfig(enabled=True, app_id="a", app_secret="b")
+    registry = ToolRegistry()
+    register_feishu_tools(registry, cfg)
+    assert "feishu_doc" in registry
+    assert "feishu_wiki" in registry
+    assert "feishu_bitable" in registry
+    assert "feishu_drive" in registry
+    assert "feishu_task" in registry
+
+
+def test_feishu_tools_respect_disabled_flags():
+    from nanobot.agent.tools.feishu import register_feishu_tools
+    from nanobot.agent.tools.registry import ToolRegistry
+    from nanobot.config.schema import FeishuConfig, FeishuToolsConfig
+
+    cfg = FeishuConfig(
+        enabled=True, app_id="a", app_secret="b",
+        tools=FeishuToolsConfig(doc=False, wiki=True, bitable=False, drive=True, task=False),
+    )
+    registry = ToolRegistry()
+    register_feishu_tools(registry, cfg)
+    assert "feishu_doc" not in registry
+    assert "feishu_wiki" in registry
+    assert "feishu_bitable" not in registry
+    assert "feishu_drive" in registry
+    assert "feishu_task" not in registry
+
+
+
 

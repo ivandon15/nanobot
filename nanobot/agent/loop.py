@@ -135,6 +135,9 @@ class AgentLoop:
             from nanobot.agent.tools.openviking import OV_TOOLS
             for cls in OV_TOOLS:
                 self.tools.register(cls(data_path=self.openviking_config.data_path))
+        if self.channels_config and self.channels_config.feishu.enabled:
+            from nanobot.agent.tools.feishu import register_feishu_tools
+            register_feishu_tools(self.tools, self.channels_config.feishu)
 
     async def _connect_mcp(self) -> None:
         """Connect to configured MCP servers (one-time, lazy)."""
