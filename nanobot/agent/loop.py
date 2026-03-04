@@ -57,6 +57,7 @@ class AgentLoop:
         max_tokens: int = 4096,
         memory_window: int = 100,
         reasoning_effort: str | None = None,
+        image_provider: "LLMProvider | None" = None,
         brave_api_key: str | None = None,
         web_proxy: str | None = None,
         exec_config: ExecToolConfig | None = None,
@@ -78,6 +79,7 @@ class AgentLoop:
         self.max_tokens = max_tokens
         self.memory_window = memory_window
         self.reasoning_effort = reasoning_effort
+        self.image_provider = image_provider
         self.brave_api_key = brave_api_key
         self.web_proxy = web_proxy
         self.exec_config = exec_config or ExecToolConfig()
@@ -208,7 +210,16 @@ class AgentLoop:
         while iteration < self.max_iterations:
             iteration += 1
 
-            response = await self.provider.chat(
+            # Use image_provider when the current turn has images
+            has_images = any(
+                isinstance(m.get("content"), list) and
+                any(c.get("type") == "image_url" for c in m["content"])
+                for m in messages if m.get("role") == "user"
+            )
+            active_provider = (
+                self.image_provider if (has_images and self.image_provider) else self.provider
+            )
+            response = await active_provider.chat(
                 messages=messages,
                 tools=self.tools.get_definitions(),
                 model=self.model,

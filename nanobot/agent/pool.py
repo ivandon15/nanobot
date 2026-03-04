@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Callable
 from loguru import logger
 
 from nanobot.agent.loop import AgentLoop
+from nanobot.providers.fallback_provider import FallbackProvider
 from nanobot.session.manager import SessionManager
 
 if TYPE_CHECKING:
@@ -41,8 +42,11 @@ class AgentPool:
             defaults = self.config.agents.defaults
             workspace = Path(defaults.workspace).expanduser()
             model = defaults.model
-            provider_name = defaults.provider if defaults.provider != "auto" else None
-            provider = self.provider_factory(model, provider_name)
+            fb_models = defaults.model_fallbacks
+            img_model = defaults.image_model
+            img_fb = defaults.image_model_fallbacks
+            provider = self._build_provider_chain(model, fb_models)
+            image_provider = self._build_provider_chain(img_model, img_fb) if img_model else None
 
             agent = self._create_agent(
                 agent_id="default",
@@ -54,6 +58,7 @@ class AgentPool:
                 max_iterations=defaults.max_tool_iterations,
                 memory_window=defaults.memory_window,
                 reasoning_effort=defaults.reasoning_effort,
+                image_provider=image_provider,
             )
             self._agents["default"] = agent
             logger.info("Created default agent")
@@ -65,7 +70,11 @@ class AgentPool:
                 provider_name = agent_config.provider or defaults.provider
                 if provider_name == "auto":
                     provider_name = None
-                provider = self.provider_factory(model, provider_name)
+                fb_models = agent_config.model_fallbacks if agent_config.model_fallbacks is not None else defaults.model_fallbacks
+                img_model = agent_config.image_model if agent_config.image_model is not None else defaults.image_model
+                img_fb = agent_config.image_model_fallbacks if agent_config.image_model_fallbacks is not None else defaults.image_model_fallbacks
+                provider = self._build_provider_chain(model, fb_models)
+                image_provider = self._build_provider_chain(img_model, img_fb) if img_model else None
 
                 workspace_str = agent_config.workspace or defaults.workspace
                 workspace = Path(workspace_str).expanduser() / agent_config.id
@@ -80,9 +89,17 @@ class AgentPool:
                     max_iterations=agent_config.max_tool_iterations or defaults.max_tool_iterations,
                     memory_window=agent_config.memory_window or defaults.memory_window,
                     reasoning_effort=agent_config.reasoning_effort or defaults.reasoning_effort,
+                    image_provider=image_provider,
                 )
                 self._agents[agent_config.id] = agent
                 logger.info("Created agent: {}", agent_config.id)
+
+    def _build_provider_chain(self, primary_model: str, fallback_models: list[str]) -> FallbackProvider:
+        """Build a FallbackProvider from primary + fallback model list."""
+        chain = [(self.provider_factory(primary_model, None), primary_model)]
+        for fb in fallback_models:
+            chain.append((self.provider_factory(fb, None), fb))
+        return FallbackProvider(chain)
 
     def _create_agent(
         self,
@@ -95,6 +112,7 @@ class AgentPool:
         max_iterations: int,
         memory_window: int,
         reasoning_effort: str | None,
+        image_provider: "FallbackProvider | None" = None,
     ) -> AgentLoop:
         """Create a single AgentLoop instance."""
         workspace.mkdir(parents=True, exist_ok=True)
@@ -109,6 +127,7 @@ class AgentPool:
             max_tokens=max_tokens,
             memory_window=memory_window,
             reasoning_effort=reasoning_effort,
+            image_provider=image_provider,
             brave_api_key=self.config.tools.web.search.api_key,
             web_proxy=self.config.tools.web.proxy,
             exec_config=self.config.tools.exec,
