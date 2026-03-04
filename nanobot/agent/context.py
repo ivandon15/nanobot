@@ -23,7 +23,7 @@ class ContextBuilder:
         self.memory = MemoryStore(workspace)
         self.skills = SkillsLoader(workspace)
 
-    def build_system_prompt(self, skill_names: list[str] | None = None) -> str:
+    def build_system_prompt(self, skill_names: list[str] | None = None, peer_agent_names: list[str] | None = None) -> str:
         """Build the system prompt from identity, bootstrap files, memory, and skills."""
         parts = [self._get_identity()]
 
@@ -49,6 +49,14 @@ The following skills extend your capabilities. To use a skill, read its SKILL.md
 Skills with available="false" need dependencies installed first - you can try installing them with apt/brew.
 
 {skills_summary}""")
+
+        if peer_agent_names:
+            parts.append(
+                "## Peer Agents\n\n"
+                f"You are sharing this group with: {', '.join(peer_agent_names)}.\n"
+                "Use `discuss_with_agents` when the question benefits from multiple perspectives "
+                "or specialized knowledge. Do NOT use it for simple questions you can handle alone."
+            )
 
         return "\n\n---\n\n".join(parts)
 
@@ -110,6 +118,7 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
         media: list[str] | None = None,
         channel: str | None = None,
         chat_id: str | None = None,
+        peer_agent_names: list[str] | None = None,
     ) -> list[dict[str, Any]]:
         """Build the complete message list for an LLM call."""
         runtime_ctx = self._build_runtime_context(channel, chat_id)
@@ -123,7 +132,7 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
             merged = [{"type": "text", "text": runtime_ctx}] + user_content
 
         return [
-            {"role": "system", "content": self.build_system_prompt(skill_names)},
+            {"role": "system", "content": self.build_system_prompt(skill_names, peer_agent_names)},
             *history,
             {"role": "user", "content": merged},
         ]

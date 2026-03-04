@@ -31,6 +31,7 @@ class AgentPool:
         self.provider_factory = provider_factory
         self._agents: dict[str, AgentLoop] = {}
         self._bindings: dict[tuple[str, str], str] = {}
+        self._group_members: dict[str, set[str]] = {}  # chat_id -> {agent_id}
 
         self._init_agents()
         self._init_bindings()
@@ -136,7 +137,22 @@ class AgentPool:
             mcp_servers=self.config.tools.mcp_servers,
             channels_config=self.config.channels,
             openviking_config=self.config.tools.openviking,
+            agent_id=agent_id,
+            agent_pool=self,
         )
+
+    def register_group_member(self, chat_id: str, agent_id: str) -> None:
+        """Record that agent_id is active in chat_id."""
+        self._group_members.setdefault(chat_id, set()).add(agent_id)
+
+    def get_peer_agents(self, chat_id: str, exclude_agent_id: str) -> dict[str, "AgentLoop"]:
+        """Return agent_id -> AgentLoop for all agents in chat_id except exclude_agent_id."""
+        members = self._group_members.get(chat_id, set())
+        return {
+            aid: self._agents[aid]
+            for aid in members
+            if aid != exclude_agent_id and aid in self._agents
+        }
 
     def _init_bindings(self) -> None:
         """Build (channel, accountId) -> agentId map."""

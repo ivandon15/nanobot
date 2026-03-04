@@ -67,6 +67,8 @@ class AgentLoop:
         mcp_servers: dict | None = None,
         channels_config: ChannelsConfig | None = None,
         openviking_config: OpenVikingConfig | None = None,
+        agent_id: str | None = None,
+        agent_pool: Any | None = None,
     ):
         from nanobot.config.schema import ExecToolConfig
         self.bus = bus
@@ -86,6 +88,8 @@ class AgentLoop:
         self.cron_service = cron_service
         self.restrict_to_workspace = restrict_to_workspace
         self.openviking_config = openviking_config
+        self._agent_id = agent_id
+        self._agent_pool = agent_pool
 
         self.context = ContextBuilder(workspace)
         self.sessions = session_manager or SessionManager(workspace)
@@ -115,6 +119,19 @@ class AgentLoop:
         self._active_tasks: dict[str, list[asyncio.Task]] = {}  # session_key -> tasks
         self._processing_lock = asyncio.Lock()
         self._register_default_tools()
+
+    def _refresh_discuss_tool(self, chat_id: str) -> None:
+        """Register or update DiscussTool with current group peers."""
+        if not self._agent_pool or not self._agent_id:
+            return
+        from nanobot.agent.tools.discuss import DiscussTool
+        peers = self._agent_pool.get_peer_agents(chat_id, self._agent_id)
+        if not peers:
+            return
+        if self.tools.get("discuss_with_agents") is None:
+            self.tools.register(DiscussTool(
+                get_peers=lambda cid=chat_id: self._agent_pool.get_peer_agents(cid, self._agent_id)
+            ))
 
     def _register_default_tools(self) -> None:
         """Register the default set of tools."""
@@ -387,6 +404,10 @@ class AgentLoop:
         key = session_key or msg.session_key
         session = self.sessions.get_or_create(key)
 
+        if msg.metadata.get("chat_type") == "group" and self._agent_pool and self._agent_id:
+            self._agent_pool.register_group_member(msg.chat_id, self._agent_id)
+            self._refresh_discuss_tool(msg.chat_id)
+
         # Slash commands
         cmd = msg.content.strip().lower()
         if cmd == "/new":
@@ -445,11 +466,17 @@ class AgentLoop:
                 message_tool.start_turn()
 
         history = session.get_history(max_messages=self.memory_window)
+        peer_names = (
+            list(self._agent_pool.get_peer_agents(msg.chat_id, self._agent_id).keys())
+            if (self._agent_pool and self._agent_id and msg.metadata.get("chat_type") == "group")
+            else None
+        )
         initial_messages = self.context.build_messages(
             history=history,
             current_message=msg.content,
             media=msg.media if msg.media else None,
             channel=msg.channel, chat_id=msg.chat_id,
+            peer_agent_names=peer_names,
         )
 
         async def _bus_progress(content: str, *, tool_hint: bool = False) -> None:
