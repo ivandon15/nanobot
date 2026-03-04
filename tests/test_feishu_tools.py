@@ -59,3 +59,37 @@ async def test_feishu_doc_read_calls_api():
         result = await tool.execute(action="read", doc_id="doxcnABC123")
     assert "doc content here" in result
 
+
+# Task 7: feishu_wiki tests
+def test_feishu_wiki_tool_name():
+    from nanobot.agent.tools.feishu.wiki import FeishuWikiTool
+    tool = FeishuWikiTool(FeishuConfig(enabled=True, app_id="a", app_secret="b"))
+    assert tool.name == "feishu_wiki"
+
+
+def test_feishu_wiki_tool_has_required_params():
+    from nanobot.agent.tools.feishu.wiki import FeishuWikiTool
+    tool = FeishuWikiTool(FeishuConfig(enabled=True, app_id="a", app_secret="b"))
+    props = tool.parameters["properties"]
+    assert "action" in props
+
+
+@pytest.mark.asyncio
+async def test_feishu_wiki_list_spaces_calls_api():
+    from unittest.mock import MagicMock, patch
+    from nanobot.agent.tools.feishu.wiki import FeishuWikiTool
+
+    tool = FeishuWikiTool(FeishuConfig(enabled=True, app_id="a", app_secret="b"))
+    mock_client = MagicMock()
+    mock_resp = MagicMock()
+    mock_resp.success.return_value = True
+    mock_space = MagicMock()
+    mock_space.space_id = "sp_123"
+    mock_space.name = "My Space"
+    mock_resp.data.items = [mock_space]
+    mock_resp.data.has_more = False
+    mock_client.wiki.v2.space.list.return_value = mock_resp
+
+    with patch("nanobot.agent.tools.feishu.wiki.get_feishu_client", return_value=mock_client):
+        result = await tool.execute(action="list_spaces")
+    assert "sp_123" in result
