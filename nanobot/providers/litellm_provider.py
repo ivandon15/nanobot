@@ -8,6 +8,7 @@ from typing import Any
 import json_repair
 import litellm
 from litellm import acompletion
+from loguru import logger
 
 from nanobot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
 from nanobot.providers.registry import find_by_model, find_gateway
@@ -241,11 +242,23 @@ class LiteLLMProvider(LLMProvider):
             kwargs["tools"] = tools
             kwargs["tool_choice"] = "auto"
 
+        model_display = original_model.split("/")[-1]
+        logger.info("LLM request: model={}", model_display)
         try:
             response = await acompletion(**kwargs)
-            return self._parse_response(response)
+            result = self._parse_response(response)
+            usage = result.usage
+            logger.info(
+                "LLM response: model={} finish={} tokens={} (prompt={} completion={})",
+                model_display,
+                result.finish_reason,
+                usage.get("total_tokens", "?"),
+                usage.get("prompt_tokens", "?"),
+                usage.get("completion_tokens", "?"),
+            )
+            return result
         except Exception as e:
-            # Return error as content for graceful handling
+            logger.warning("LLM error: model={} error={}", model_display, e)
             return LLMResponse(
                 content=f"Error calling LLM: {str(e)}",
                 finish_reason="error",
