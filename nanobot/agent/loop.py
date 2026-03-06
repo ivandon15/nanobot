@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import threading
 import weakref
 from contextlib import AsyncExitStack
 from pathlib import Path
@@ -91,7 +92,12 @@ class AgentLoop:
         self._agent_id = agent_id
         self._agent_pool = agent_pool
 
-        self.context = ContextBuilder(workspace)
+        ov_data_path = (
+            self.openviking_config.resolved_data_path(workspace)
+            if self.openviking_config and self.openviking_config.enabled
+            else None
+        )
+        self.context = ContextBuilder(workspace, ov_data_path=ov_data_path)
         self.sessions = session_manager or SessionManager(workspace)
         self.tools = ToolRegistry()
         self.subagents = SubagentManager(
@@ -118,6 +124,8 @@ class AgentLoop:
         self._consolidation_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
         self._active_tasks: dict[str, list[asyncio.Task]] = {}  # session_key -> tasks
         self._processing_lock = asyncio.Lock()
+        self._current_context: tuple[str, str, dict] | None = None  # (channel, chat_id, metadata)
+        self._inbound: asyncio.Queue[InboundMessage] = asyncio.Queue()  # Per-agent inbound queue
         self._register_default_tools()
 
     def _refresh_discuss_tool(self, chat_id: str) -> None:
@@ -130,7 +138,10 @@ class AgentLoop:
             return
         if self.tools.get("discuss_with_agents") is None:
             self.tools.register(DiscussTool(
-                get_peers=lambda cid=chat_id: self._agent_pool.get_peer_agents(cid, self._agent_id)
+                get_peers=lambda cid=chat_id: self._agent_pool.get_peer_agents(cid, self._agent_id),
+                bus=self.bus,
+                get_context=lambda: self._current_context,
+                get_agent_account=lambda ch, aid: self._agent_pool.get_agent_account(ch, aid),
             ))
 
     def _register_default_tools(self) -> None:
@@ -153,7 +164,7 @@ class AgentLoop:
         if self.openviking_config and self.openviking_config.enabled:
             from nanobot.agent.tools.openviking import OV_TOOLS
             for cls in OV_TOOLS:
-                self.tools.register(cls(data_path=self.openviking_config.data_path))
+                self.tools.register(cls(data_path=self.openviking_config.resolved_data_path(self.workspace)))
         if self.channels_config and self.channels_config.feishu.enabled:
             from nanobot.agent.tools.feishu import register_feishu_tools
             register_feishu_tools(self.tools, self.channels_config.feishu)
@@ -248,7 +259,8 @@ class AgentLoop:
             if response.has_tool_calls:
                 if on_progress:
                     clean = self._strip_think(response.content)
-                    if clean:
+                    tool_names = {tc.name for tc in response.tool_calls}
+                    if clean and "message" not in tool_names:
                         await on_progress(clean)
                     await on_progress(self._tool_hint(response.tool_calls), tool_hint=True)
 
@@ -301,6 +313,10 @@ class AgentLoop:
 
         return final_content, tools_used, messages
 
+    async def enqueue(self, msg: InboundMessage) -> None:
+        """Put a message directly into this agent's inbound queue."""
+        await self._inbound.put(msg)
+
     async def run(self) -> None:
         """Run the agent loop, dispatching messages as tasks to stay responsive to /stop."""
         self._running = True
@@ -309,7 +325,7 @@ class AgentLoop:
 
         while self._running:
             try:
-                msg = await asyncio.wait_for(self.bus.consume_inbound(), timeout=1.0)
+                msg = await asyncio.wait_for(self._inbound.get(), timeout=1.0)
             except asyncio.TimeoutError:
                 continue
 
@@ -404,6 +420,9 @@ class AgentLoop:
         key = session_key or msg.session_key
         session = self.sessions.get_or_create(key)
 
+        # Store current context so DiscussTool can send visible group messages
+        self._current_context = (msg.channel, msg.chat_id, msg.metadata or {})
+
         if msg.metadata.get("chat_type") == "group" and self._agent_pool and self._agent_id:
             self._agent_pool.register_group_member(msg.chat_id, self._agent_id)
             self._refresh_discuss_tool(msg.chat_id)
@@ -466,11 +485,14 @@ class AgentLoop:
                 message_tool.start_turn()
 
         history = session.get_history(max_messages=self.memory_window)
-        peer_names = (
-            list(self._agent_pool.get_peer_agents(msg.chat_id, self._agent_id).keys())
-            if (self._agent_pool and self._agent_id and msg.metadata.get("chat_type") == "group")
-            else None
-        )
+        peer_names = None
+        if self._agent_pool and self._agent_id and msg.metadata.get("chat_type") == "group":
+            peers = self._agent_pool.get_peer_agents(msg.chat_id, self._agent_id)
+            # Build (agent_id, account_name) pairs so the prompt can show @mention names
+            peer_names = [
+                (aid, self._agent_pool.get_agent_account(msg.channel, aid) or aid)
+                for aid in peers.keys()
+            ]
         initial_messages = self.context.build_messages(
             history=history,
             current_message=msg.content,
@@ -498,11 +520,13 @@ class AgentLoop:
         self.sessions.save(session)
 
         if self.openviking_config and self.openviking_config.auto_commit:
-            _task = asyncio.create_task(
-                self._commit_to_ov(msg.channel, msg.chat_id, msg.content, final_content)
+            data_path = self.openviking_config.resolved_data_path(self.workspace)
+            _thread = threading.Thread(
+                target=self._commit_to_ov_in_thread,
+                args=(data_path, msg.channel, msg.chat_id, msg.content, final_content),
+                daemon=True,
             )
-            self._consolidation_tasks.add(_task)
-            _task.add_done_callback(self._consolidation_tasks.discard)
+            _thread.start()
 
         if (mt := self.tools.get("message")) and isinstance(mt, MessageTool) and mt._sent_in_turn:
             return None
@@ -514,13 +538,24 @@ class AgentLoop:
             metadata=msg.metadata or {},
         )
 
-    async def _commit_to_ov(self, channel: str, chat_id: str, user_content: str, assistant_content: str) -> None:
+    def _commit_to_ov_in_thread(self, data_path: str, channel: str, chat_id: str, user_content: str, assistant_content: str) -> None:
+        """Run OpenViking commit in a separate thread with its own event loop."""
+        import asyncio as _asyncio
+        loop = _asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(
+                self._commit_to_ov(data_path, channel, chat_id, user_content, assistant_content)
+            )
+        finally:
+            loop.close()
+
+    async def _commit_to_ov(self, data_path: str, channel: str, chat_id: str, user_content: str, assistant_content: str) -> None:
         """Add the current turn to OpenViking and commit the session."""
         if not self.openviking_config:
             return
         try:
             from nanobot.agent.tools.openviking_client import get_client
-            client = await get_client(self.openviking_config.data_path)
+            client = await get_client(data_path)
             session_id = f"{channel}:{chat_id}"
             await client.add_message(session_id=session_id, role="user", content=user_content)
             await client.add_message(session_id=session_id, role="assistant", content=assistant_content)
@@ -578,9 +613,33 @@ class AgentLoop:
         channel: str = "cli",
         chat_id: str = "direct",
         on_progress: Callable[[str], Awaitable[None]] | None = None,
+        reply_channel: str | None = None,
+        reply_chat_id: str | None = None,
+        reply_metadata: dict | None = None,
     ) -> str:
         """Process a message directly (for CLI or cron usage)."""
         await self._connect_mcp()
         msg = InboundMessage(channel=channel, sender_id="user", chat_id=chat_id, content=content)
         response = await self._process_message(msg, session_key=session_key, on_progress=on_progress)
-        return response.content if response else ""
+
+        # If _process_message returned None it means the agent used the message tool
+        # to send directly. Recover the content from the tool so callers (e.g. DiscussTool)
+        # still get the actual response text.
+        if response is None:
+            mt = self.tools.get("message")
+            from nanobot.agent.tools.message import MessageTool
+            result = (mt._last_content or "") if isinstance(mt, MessageTool) else ""
+        else:
+            result = response.content or ""
+
+        # If reply coordinates are given, publish the response visibly to the group
+        # using the peer's own account_id so it appears from the right Feishu account.
+        # Only do this when the agent didn't already send via the message tool.
+        if reply_channel and reply_chat_id and result and response is not None:
+            meta = dict(reply_metadata or {})
+            await self.bus.publish_outbound(OutboundMessage(
+                channel=reply_channel, chat_id=reply_chat_id,
+                content=result, metadata=meta,
+            ))
+
+        return result

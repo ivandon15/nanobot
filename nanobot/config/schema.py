@@ -272,6 +272,7 @@ class ProviderConfig(Base):
     api_key: str = ""
     api_base: str | None = None
     extra_headers: dict[str, str] | None = None  # Custom headers (e.g. APP-Code for AiHubMix)
+    protocol: Literal["openai", "anthropic"] = "openai"  # API protocol for custom provider
 
 
 class ProvidersConfig(Base):
@@ -347,8 +348,17 @@ class OpenVikingConfig(Base):
     """OpenViking persistent memory configuration."""
 
     enabled: bool = False
-    data_path: str = "~/.nanobot/ov_data"
+    # Empty string means "auto: derive from the nanobot data directory (~/.nanobot/ov_data)".
+    data_path: str = ""
     auto_commit: bool = True
+
+    def resolved_data_path(self, workspace_path: "Path | None" = None) -> str:
+        """Return the effective data path, expanding ~ and falling back to <workspace>/ov_data."""
+        raw = self.data_path.strip()
+        if raw:
+            return str(Path(raw).expanduser())
+        base = workspace_path or (Path.home() / ".nanobot" / "workspace")
+        return str(Path(base) / "ov_data")
 
 
 class ToolsConfig(Base):

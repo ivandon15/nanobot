@@ -159,30 +159,55 @@ def main(
 @app.command()
 def onboard():
     """Initialize nanobot configuration and workspace."""
+    from pathlib import Path as _Path
+
     from nanobot.config.loader import get_config_path, load_config, save_config
     from nanobot.config.schema import Config
     from nanobot.utils.helpers import get_workspace_path
 
     config_path = get_config_path()
 
+    # ── Load or create config ────────────────────────────────────────────────
     if config_path.exists():
         console.print(f"[yellow]Config already exists at {config_path}[/yellow]")
         console.print("  [bold]y[/bold] = overwrite with defaults (existing values will be lost)")
         console.print("  [bold]N[/bold] = refresh config, keeping existing values and adding new fields")
-        if typer.confirm("Overwrite?"):
-            config = Config()
-            save_config(config)
-            console.print(f"[green]✓[/green] Config reset to defaults at {config_path}")
-        else:
-            config = load_config()
-            save_config(config)
-            console.print(f"[green]✓[/green] Config refreshed at {config_path} (existing values preserved)")
+        config = Config() if typer.confirm("Overwrite?") else load_config()
     else:
-        save_config(Config())
-        console.print(f"[green]✓[/green] Created config at {config_path}")
+        config = Config()
 
-    # Create workspace
-    workspace = get_workspace_path()
+    # ── Prompt: workspace ────────────────────────────────────────────────────
+    console.print("\n[bold]Workspace directory[/bold] — where nanobot stores memories and files.")
+    workspace_input = typer.prompt(
+        "Workspace",
+        default=config.agents.defaults.workspace or "~/.nanobot/workspace",
+    )
+    config.agents.defaults.workspace = workspace_input
+
+    # ── Prompt: OpenViking data directory ───────────────────────────────────
+    # Default: inside workspace directory
+    ws_path = _Path(workspace_input).expanduser()
+    default_ov_data = str(ws_path / "ov_data")
+    current_ov = config.tools.openviking.data_path.strip()
+
+    console.print(
+        "\n[bold]OpenViking data directory[/bold] — long-term memory store "
+        "(leave empty to auto-derive alongside workspace)."
+    )
+    ov_data_input = typer.prompt(
+        "OpenViking data path (empty = auto)",
+        default=current_ov if current_ov else default_ov_data,
+    )
+    # Normalise: if user typed the auto-derived default exactly, store as-is;
+    # if they explicitly typed it, keep it; empty → store empty for auto.
+    config.tools.openviking.data_path = ov_data_input.strip()
+
+    # ── Save config ──────────────────────────────────────────────────────────
+    save_config(config)
+    console.print(f"[green]✓[/green] Config saved at {config_path}")
+
+    # ── Create workspace ─────────────────────────────────────────────────────
+    workspace = get_workspace_path(workspace_input)
 
     if not workspace.exists():
         workspace.mkdir(parents=True, exist_ok=True)
@@ -217,6 +242,16 @@ def _make_provider(config: Config):
 
     # Custom: direct OpenAI-compatible endpoint, bypasses LiteLLM
     if provider_name == "custom":
+        if p and p.protocol == "anthropic":
+            # Prefix model with "anthropic/" so LiteLLM routes to Anthropic provider
+            # (without this, "kimi-for-coding" matches Moonshot keywords instead)
+            prefixed = model if model.startswith("anthropic/") else f"anthropic/{model}"
+            return LiteLLMProvider(
+                api_key=p.api_key,
+                api_base=p.api_base,
+                default_model=prefixed,
+                provider_name="anthropic",
+            )
         return CustomProvider(
             api_key=p.api_key if p else "no-key",
             api_base=config.get_api_base(model) or "http://localhost:8000/v1",
@@ -287,6 +322,14 @@ def gateway(
 
         # Custom: direct OpenAI-compatible endpoint
         if provider_name == "custom":
+            if p and p.protocol == "anthropic":
+                prefixed = model if model.startswith("anthropic/") else f"anthropic/{model}"
+                return LiteLLMProvider(
+                    api_key=p.api_key,
+                    api_base=p.api_base,
+                    default_model=prefixed,
+                    provider_name="anthropic",
+                )
             return CustomProvider(
                 api_key=p.api_key if p else "no-key",
                 api_base=config.get_api_base(model) or "http://localhost:8000/v1",
@@ -467,6 +510,7 @@ def gateway(
             agent_tasks = [agent.run() for agent in agent_pool._agents.values()]
             await asyncio.gather(
                 *agent_tasks,
+                agent_pool.run_bus_router(),
                 channels.start_all(),
             )
         except KeyboardInterrupt:
@@ -1105,6 +1149,15 @@ def status():
             else:
                 has_key = bool(p.api_key)
                 console.print(f"{spec.label}: {'[green]✓[/green]' if has_key else '[dim]not set[/dim]'}")
+
+        # OpenViking
+        ov = config.tools.openviking
+        ov_path = ov.resolved_data_path(workspace)
+        from pathlib import Path as _Path
+        ov_exists = _Path(ov_path).exists()
+        ov_enabled = "[green]enabled[/green]" if ov.enabled else "[dim]disabled[/dim]"
+        ov_dir = f"{ov_path} {'[green]✓[/green]' if ov_exists else '[dim]not created yet[/dim]'}"
+        console.print(f"OpenViking: {ov_enabled}  data→ {ov_dir}")
 
 
 # ============================================================================

@@ -246,6 +246,70 @@ def _extract_post_content(content_json: dict) -> tuple[str, list[str]]:
 
 
 
+class _FixedWsClient(lark.ws.Client if FEISHU_AVAILABLE else object):
+    """lark.ws.Client subclass that fixes multi-account use.
+
+    The upstream client stores a module-level ``loop`` variable and calls
+    ``loop.create_task(...)`` inside ``_connect`` and ``_receive_message_loop``.
+    When two threads each run ``asyncio.run()``, they get different loops but
+    both write to the same module-level variable, causing
+    "Future attached to a different loop" errors.
+
+    This subclass overrides those two methods to use
+    ``asyncio.get_running_loop()`` instead.
+    """
+
+    async def _connect(self) -> None:
+        import websockets as _ws
+        from urllib.parse import urlparse, parse_qs
+        import lark_oapi.ws.client as _lark_ws_mod
+        from lark_oapi.ws.const import DEVICE_ID, SERVICE_ID
+        from lark_oapi.core.log import logger as _lark_logger
+
+        _loop = asyncio.get_running_loop()
+        await self._lock.acquire()
+        if self._conn is not None:
+            return
+        try:
+            conn_url = self._get_conn_url()
+            u = urlparse(conn_url)
+            q = parse_qs(u.query)
+            conn_id = q[DEVICE_ID][0]
+            service_id = q[SERVICE_ID][0]
+
+            conn = await _ws.connect(conn_url)
+            self._conn = conn
+            self._conn_url = conn_url
+            self._conn_id = conn_id
+            self._service_id = service_id
+
+            _lark_logger.info(self._fmt_log("connected to {}", conn_url))
+            _loop.create_task(self._receive_message_loop())
+        except _ws.InvalidStatusCode as e:
+            _lark_ws_mod._parse_ws_conn_exception(e)
+        finally:
+            self._lock.release()
+
+    async def _receive_message_loop(self):
+        from lark_oapi.ws.exception import ConnectionClosedException
+        from lark_oapi.core.log import logger as _lark_logger
+
+        _loop = asyncio.get_running_loop()
+        try:
+            while True:
+                if self._conn is None:
+                    raise ConnectionClosedException("connection is closed")
+                msg = await self._conn.recv()
+                _loop.create_task(self._handle_message(msg))
+        except Exception as e:
+            _lark_logger.error(self._fmt_log("receive message loop exit, err: {}", e))
+            await self._disconnect()
+            if self._auto_reconnect:
+                await self._reconnect()
+            else:
+                raise e
+
+
 def _should_use_card(text: str) -> bool:
     """Detect if text contains markdown that benefits from card rendering."""
     return bool(
@@ -357,7 +421,7 @@ class FeishuChannel(BaseChannel):
 
             # Fetch bot open_id for mention detection
             loop = asyncio.get_running_loop()
-            open_id = await loop.run_in_executor(None, self._fetch_bot_open_id_sync, client)
+            open_id = await loop.run_in_executor(None, self._fetch_bot_open_id_sync, app_id, app_secret)
             if open_id:
                 self._bot_open_ids[account_id] = open_id
                 logger.info("Feishu bot open_id for {}: {}", account_id, open_id)
@@ -370,24 +434,38 @@ class FeishuChannel(BaseChannel):
                 lambda data, aid=account_id: self._on_message_sync(data, aid)
             ).build()
 
-            # Create WebSocket client
-            ws_client = lark.ws.Client(
-                app_id,
-                app_secret,
-                event_handler=event_handler,
-                log_level=lark.LogLevel.INFO
-            )
-            self._ws_clients[account_id] = ws_client
+            # Each account runs in its own daemon thread with an isolated asyncio.run() loop.
+            # _FixedWsClient overrides _connect/_receive_message_loop to use
+            # asyncio.get_running_loop() instead of the module-level loop variable,
+            # which is what caused "Future attached to a different loop" with multiple accounts.
+            def run_ws(aid=account_id, _app_id=app_id, _app_secret=app_secret, _eh=event_handler):
+                async def _run_forever():
+                    ws_client = _FixedWsClient(
+                        _app_id, _app_secret,
+                        event_handler=_eh,
+                        log_level=lark.LogLevel.INFO,
+                        auto_reconnect=False,
+                    )
+                    self._ws_clients[aid] = ws_client
+                    ping_task = None
+                    retry_delay = 5
+                    while self._running:
+                        try:
+                            await ws_client._connect()
+                            retry_delay = 5  # reset on successful connect
+                            if ping_task:
+                                ping_task.cancel()
+                            ping_task = asyncio.get_running_loop().create_task(ws_client._ping_loop())
+                            while self._running and ws_client._conn is not None:
+                                await asyncio.sleep(1)
+                        except Exception as e:
+                            if e:
+                                logger.warning("Feishu WebSocket error ({}): {}", aid, e)
+                            retry_delay = min(retry_delay * 2, 60)
+                        if self._running:
+                            await asyncio.sleep(retry_delay)
 
-            # Start WebSocket in thread
-            def run_ws(ws_client=ws_client, aid=account_id):
-                while self._running:
-                    try:
-                        ws_client.start()
-                    except Exception as e:
-                        logger.warning("Feishu WebSocket error ({}): {}", aid, e)
-                    if self._running:
-                        time.sleep(5)
+                asyncio.run(_run_forever())
 
             ws_thread = threading.Thread(target=run_ws, daemon=True)
             ws_thread.start()
@@ -413,13 +491,12 @@ class FeishuChannel(BaseChannel):
         self._running = False
         logger.info("Feishu bot stopped")
 
-    def _fetch_bot_open_id_sync(self, client: Any) -> str | None:
+    def _fetch_bot_open_id_sync(self, app_id: str, app_secret: str) -> str | None:
         """Fetch this bot's own open_id via /open-apis/bot/v3/info."""
         try:
-            cfg = client.config
             token_resp = _requests.post(
                 "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal",
-                json={"app_id": cfg.app_id, "app_secret": cfg.app_secret},
+                json={"app_id": app_id, "app_secret": app_secret},
                 timeout=10,
             )
             token_data = token_resp.json()
@@ -475,22 +552,12 @@ class FeishuChannel(BaseChannel):
         media: list[str] | None = None,
         metadata: dict | None = None,
     ) -> None:
-        """Handle group message with group-level permission and mention gating."""
-        # 1. Group allowlist check
-        group_allow_from = self.config.group_allow_from
-        if group_allow_from and chat_id not in group_allow_from:
-            logger.debug("Feishu group {} not in group_allow_from, skipping", chat_id)
-            return
-
-        # 2. requireMention check
+        """Handle group message: strip bot mention, inject sender name, forward to bus."""
+        # Strip bot mention from content
         if self.config.require_mention:
-            bot_open_id = self._bot_open_ids.get(account_id)
-            if not _check_bot_mentioned(mentions, bot_open_id):
-                logger.debug("Feishu group message in {} not mentioning bot, skipping", chat_id)
-                return
             content = _strip_bot_mention(content, mentions)
 
-        # 3. Sender name injection
+        # Sender name injection
         client = self._clients.get(account_id)
         if client and sender_id:
             loop = asyncio.get_running_loop()
@@ -498,7 +565,7 @@ class FeishuChannel(BaseChannel):
             if name:
                 content = f"[{name}]: {content}" if content else f"[{name}]"
 
-        # 4. Forward to bus
+        # 4. Forward to the correct agent (or shared bus as fallback)
         from nanobot.bus.events import InboundMessage
         msg_meta = {**(metadata or {}), "message_id": message_id, "account_id": account_id}
         msg = InboundMessage(
@@ -509,36 +576,43 @@ class FeishuChannel(BaseChannel):
             media=media or [],
             metadata=msg_meta,
         )
-        await self.bus.publish_inbound(msg)
+        if self.agent_pool:
+            await self.agent_pool.route_inbound(msg)
+        else:
+            await self.bus.publish_inbound(msg)
 
     def _add_reaction_sync(self, message_id: str, emoji_type: str, client=None) -> str | None:
         """Sync helper for adding reaction (runs in thread pool). Returns reaction_id."""
-        try:
-            # Use provided client or fallback to legacy _client
-            c = client or self._client
-            if not c:
-                return None
+        import time as _time
+        c = client or self._client
+        if not c:
+            return None
+        last_exc = None
+        for attempt in range(2):
+            try:
+                request = CreateMessageReactionRequest.builder() \
+                    .message_id(message_id) \
+                    .request_body(
+                        CreateMessageReactionRequestBody.builder()
+                        .reaction_type(Emoji.builder().emoji_type(emoji_type).build())
+                        .build()
+                    ).build()
 
-            request = CreateMessageReactionRequest.builder() \
-                .message_id(message_id) \
-                .request_body(
-                    CreateMessageReactionRequestBody.builder()
-                    .reaction_type(Emoji.builder().emoji_type(emoji_type).build())
-                    .build()
-                ).build()
+                response = c.im.v1.message_reaction.create(request)
 
-            response = c.im.v1.message_reaction.create(request)
-
-            if not response.success():
-                logger.warning("Failed to add reaction: code={}, msg={}", response.code, response.msg)
-                return None
-            else:
+                if not response.success():
+                    logger.warning("Failed to add reaction: code={}, msg={}", response.code, response.msg)
+                    return None
                 reaction_id = response.data.reaction_id if response.data else None
                 logger.debug("Added {} reaction to message {}, reaction_id={}", emoji_type, message_id, reaction_id)
                 return reaction_id
-        except Exception as e:
-            logger.warning("Error adding reaction: {}", e)
-            return None
+            except Exception as e:
+                last_exc = e
+                if attempt == 0:
+                    logger.debug("Error adding reaction (retrying): {}", e)
+                    _time.sleep(1)
+        logger.warning("Error adding reaction: {}", last_exc)
+        return None
 
     def _delete_reaction_sync(self, message_id: str, reaction_id: str, client=None) -> None:
         """Sync helper for deleting a reaction (runs in thread pool)."""
@@ -618,6 +692,65 @@ class FeishuChannel(BaseChannel):
             "columns": columns,
             "rows": [{f"c{i}": r[i] if i < len(r) else "" for i in range(len(headers))} for r in rows],
         }
+
+    def _build_post_with_mentions(self, content: str) -> dict | None:
+        """Convert text with @AccountName patterns to a Feishu post (rich text) payload.
+
+        Returns a post payload dict if any @mention was resolved to a real open_id,
+        otherwise returns None (caller should fall back to plain text).
+
+        The name lookup is case-insensitive and tries both account_id and the
+        account's display name stored in config.
+
+        Note: Feishu post content must NOT include the outer {"post": ...} wrapper —
+        the correct format is {"zh_cn": {"content": [[...]]}} directly.
+        """
+        # Build name → open_id and open_id → display_name lookups
+        name_to_open_id: dict[str, str] = {}
+        open_id_to_name: dict[str, str] = {}
+        for account_id, open_id in self._bot_open_ids.items():
+            name_to_open_id[account_id.lower()] = open_id
+            open_id_to_name[open_id] = account_id
+            # Also index by config display name if available
+            acc_cfg = self.config.accounts.get(account_id)
+            if acc_cfg and acc_cfg.name:
+                name_to_open_id[acc_cfg.name.lower()] = open_id
+                open_id_to_name[open_id] = acc_cfg.name
+
+        # Find all @Name tokens
+        at_pattern = re.compile(r"@([\w\u4e00-\u9fff]+)")
+        matches = list(at_pattern.finditer(content))
+        if not matches:
+            return None
+
+        # Check if at least one @Name resolves to a known open_id
+        resolved_any = any(m.group(1).lower() in name_to_open_id for m in matches)
+        if not resolved_any:
+            return None
+
+        # Build post content: split text around @mentions
+        elements: list[dict] = []
+        last = 0
+        for m in matches:
+            before = content[last:m.start()]
+            if before:
+                elements.append({"tag": "text", "text": before})
+            name = m.group(1)
+            open_id = name_to_open_id.get(name.lower())
+            if open_id:
+                display_name = open_id_to_name.get(open_id, name)
+                elements.append({"tag": "at", "user_id": open_id, "user_name": display_name})
+            else:
+                # Unknown @name — keep as plain text
+                elements.append({"tag": "text", "text": m.group(0)})
+            last = m.end()
+        tail = content[last:]
+        if tail:
+            elements.append({"tag": "text", "text": tail})
+
+        # Feishu post content format: {"zh_cn": {"content": [[...]]}}
+        # Do NOT wrap in {"post": ...} — that causes error 230001.
+        return {"zh_cn": {"content": [elements]}}
 
     def _build_card_elements(self, content: str) -> list[dict]:
         """Split content into div/markdown + table elements for Feishu card."""
@@ -822,30 +955,37 @@ class FeishuChannel(BaseChannel):
 
     def _send_message_sync(self, receive_id_type: str, receive_id: str, msg_type: str, content: str, client: Any = None) -> bool:
         """Send a single message (text/image/file/interactive) synchronously."""
+        import time as _time
         if not client:
             client = self._client
-        try:
-            request = CreateMessageRequest.builder() \
-                .receive_id_type(receive_id_type) \
-                .request_body(
-                    CreateMessageRequestBody.builder()
-                    .receive_id(receive_id)
-                    .msg_type(msg_type)
-                    .content(content)
-                    .build()
-                ).build()
-            response = client.im.v1.message.create(request)
-            if not response.success():
-                logger.error(
-                    "Failed to send Feishu {} message: code={}, msg={}, log_id={}",
-                    msg_type, response.code, response.msg, response.get_log_id()
-                )
-                return False
-            logger.debug("Feishu {} message sent to {}", msg_type, receive_id)
-            return True
-        except Exception as e:
-            logger.error("Error sending Feishu {} message: {}", msg_type, e)
-            return False
+        last_exc = None
+        for attempt in range(2):
+            try:
+                request = CreateMessageRequest.builder() \
+                    .receive_id_type(receive_id_type) \
+                    .request_body(
+                        CreateMessageRequestBody.builder()
+                        .receive_id(receive_id)
+                        .msg_type(msg_type)
+                        .content(content)
+                        .build()
+                    ).build()
+                response = client.im.v1.message.create(request)
+                if not response.success():
+                    logger.error(
+                        "Failed to send Feishu {} message: code={}, msg={}, log_id={}",
+                        msg_type, response.code, response.msg, response.get_log_id()
+                    )
+                    return False
+                logger.debug("Feishu {} message sent to {}", msg_type, receive_id)
+                return True
+            except Exception as e:
+                last_exc = e
+                if attempt == 0:
+                    logger.warning("Error sending Feishu {} message (retrying): {}", msg_type, e)
+                    _time.sleep(1)
+        logger.error("Error sending Feishu {} message: {}", msg_type, last_exc)
+        return False
 
     async def send(self, msg: OutboundMessage) -> None:
         """Send a message through Feishu, including media (images/files) if present."""
@@ -887,21 +1027,30 @@ class FeishuChannel(BaseChannel):
 
             if msg.content and msg.content.strip():
                 render_mode = self.config.render_mode
-                use_card = (
-                    render_mode == "card" or
-                    (render_mode == "auto" and _should_use_card(msg.content))
-                )
-                if use_card:
-                    card = {"config": {"wide_screen_mode": True}, "elements": self._build_card_elements(msg.content)}
+                # Try to convert @mentions to real Feishu at-elements first
+                post_payload = self._build_post_with_mentions(msg.content)
+                if post_payload:
+                    logger.debug("Sending post with mentions: {}", post_payload)
                     await loop.run_in_executor(
                         None, self._send_message_sync,
-                        receive_id_type, msg.chat_id, "interactive", json.dumps(card, ensure_ascii=False), client,
+                        receive_id_type, msg.chat_id, "post", json.dumps(post_payload, ensure_ascii=False), client,
                     )
                 else:
-                    await loop.run_in_executor(
-                        None, self._send_message_sync,
-                        receive_id_type, msg.chat_id, "text", json.dumps({"text": msg.content}, ensure_ascii=False), client,
+                    use_card = (
+                        render_mode == "card" or
+                        (render_mode == "auto" and _should_use_card(msg.content))
                     )
+                    if use_card:
+                        card = {"config": {"wide_screen_mode": True}, "elements": self._build_card_elements(msg.content)}
+                        await loop.run_in_executor(
+                            None, self._send_message_sync,
+                            receive_id_type, msg.chat_id, "interactive", json.dumps(card, ensure_ascii=False), client,
+                        )
+                    else:
+                        await loop.run_in_executor(
+                            None, self._send_message_sync,
+                            receive_id_type, msg.chat_id, "text", json.dumps({"text": msg.content}, ensure_ascii=False), client,
+                        )
 
             # Delete the "thinking" reaction after final reply (not on progress messages)
             if not is_progress and msg.metadata:
@@ -928,11 +1077,13 @@ class FeishuChannel(BaseChannel):
             message = event.message
             sender = event.sender
 
-            # Deduplication check
+            # Deduplication check — keyed per account so multiple bots in the same
+            # group each process the message independently.
             message_id = message.message_id
-            if message_id in self._processed_message_ids:
+            dedup_key = f"{message_id}:{account_id}"
+            if dedup_key in self._processed_message_ids:
                 return
-            self._processed_message_ids[message_id] = None
+            self._processed_message_ids[dedup_key] = None
 
             # Trim cache
             while len(self._processed_message_ids) > 1000:
@@ -954,10 +1105,7 @@ class FeishuChannel(BaseChannel):
             chat_type = message.chat_type
             msg_type = message.message_type
 
-            # Add reaction and track reaction_id for later removal
-            reaction_id = await self._add_reaction(message_id, self.config.react_emoji, account_id)
-
-            # Parse content
+            # Parse content first (before adding reaction, so we can skip early)
             content_parts = []
             media_paths = []
 
@@ -1004,16 +1152,8 @@ class FeishuChannel(BaseChannel):
             if not content and not media_paths:
                 return
 
-            # Forward to message bus
-            base_metadata = {
-                "message_id": message_id,
-                "reaction_id": reaction_id,
-                "chat_type": chat_type,
-                "msg_type": msg_type,
-                "account_id": account_id,
-            }
+            # For group messages, check allowlist and mention before adding reaction
             if chat_type == "group":
-                # Extract mentions from event
                 mentions_raw: list[dict] = []
                 if hasattr(message, "mentions") and message.mentions:
                     mentions_raw = [
@@ -1024,6 +1164,28 @@ class FeishuChannel(BaseChannel):
                         }
                         for m in message.mentions
                     ]
+                group_allow_from = self.config.group_allow_from
+                if group_allow_from and chat_id not in group_allow_from:
+                    logger.debug("Feishu group {} not in group_allow_from, skipping", chat_id)
+                    return
+                if self.config.require_mention:
+                    bot_open_id = self._bot_open_ids.get(account_id)
+                    if not _check_bot_mentioned(mentions_raw, bot_open_id):
+                        logger.debug("Feishu group message in {} not mentioning bot, skipping", chat_id)
+                        return
+
+            # Add reaction now that we know we'll process this message
+            reaction_id = await self._add_reaction(message_id, self.config.react_emoji, account_id)
+
+            # Forward to message bus
+            base_metadata = {
+                "message_id": message_id,
+                "reaction_id": reaction_id,
+                "chat_type": chat_type,
+                "msg_type": msg_type,
+                "account_id": account_id,
+            }
+            if chat_type == "group":
                 await self._handle_group_message(
                     sender_id=sender_id,
                     chat_id=chat_id,

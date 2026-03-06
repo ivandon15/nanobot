@@ -7,6 +7,7 @@ from nanobot.agent.tools.base import Tool
 
 if TYPE_CHECKING:
     from nanobot.agent.loop import AgentLoop
+    from nanobot.bus.queue import MessageBus
 
 
 class DiscussTool(Tool):
@@ -44,11 +45,17 @@ class DiscussTool(Tool):
         self,
         peers: dict[str, "AgentLoop"] | None = None,
         get_peers: Callable[[], dict[str, "AgentLoop"]] | None = None,
-        timeout: float = 30.0,
+        timeout: float = 60.0,
+        bus: "MessageBus | None" = None,
+        get_context: "Callable[[], tuple[str, str, dict] | None] | None" = None,
+        get_agent_account: "Callable[[str, str], str | None] | None" = None,
     ):
         self._static_peers = peers or {}
         self._get_peers = get_peers
         self.timeout = timeout
+        self._bus = bus
+        self._get_context = get_context
+        self._get_agent_account = get_agent_account
 
     def _peers(self) -> dict[str, "AgentLoop"]:
         return self._get_peers() if self._get_peers is not None else self._static_peers
@@ -58,17 +65,61 @@ class DiscussTool(Tool):
         agent_ids: list[str] = kwargs["agent_ids"]
 
         peers = self._peers()
+        ctx = self._get_context() if self._get_context else None
+
+        # Resolve agent IDs: exact match first, then case-insensitive prefix/suffix fallback.
+        def _resolve(aid: str) -> str:
+            if aid in peers:
+                return aid
+            lower = aid.lower()
+            for key in peers:
+                if key.lower() == lower or key.lower().startswith(lower) or key.lower().endswith(lower):
+                    return key
+            return aid
+
+        agent_ids = [_resolve(aid) for aid in agent_ids]
+
+        # Send a visible "consulting" message to the group
+        if self._bus and ctx:
+            channel, chat_id, metadata = ctx
+            from nanobot.bus.events import OutboundMessage
+            names = ", ".join(agent_ids)
+            meta = dict(metadata)
+            await self._bus.publish_outbound(OutboundMessage(
+                channel=channel, chat_id=chat_id,
+                content=f"💬 **[→ {names}]**\n\n{question}",
+                metadata=meta,
+            ))
+
         tasks: dict[str, asyncio.Task] = {}
         for aid in agent_ids:
             agent = peers.get(aid)
             if agent is None:
                 continue
+
+            # Build reply metadata using the peer's own account_id so the
+            # response appears from the peer's Feishu account in the group.
+            reply_channel = reply_chat_id = None
+            reply_metadata: dict | None = None
+            if ctx:
+                channel, chat_id, metadata = ctx
+                reply_channel = channel
+                reply_chat_id = chat_id
+                reply_metadata = dict(metadata)
+                if self._get_agent_account:
+                    peer_account = self._get_agent_account(channel, aid)
+                    if peer_account:
+                        reply_metadata["account_id"] = peer_account
+
             tasks[aid] = asyncio.create_task(
                 agent.process_direct(
                     content=question,
-                    session_key=f"discuss:{aid}",
-                    channel="discuss",
-                    chat_id="discuss",
+                    session_key=f"discuss:{aid}:{chat_id if ctx else 'default'}",
+                    channel=channel if ctx else "discuss",
+                    chat_id=chat_id if ctx else "discuss",
+                    reply_channel=reply_channel,
+                    reply_chat_id=reply_chat_id,
+                    reply_metadata=reply_metadata,
                 )
             )
         if not tasks:

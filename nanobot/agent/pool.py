@@ -51,7 +51,7 @@ class AgentPool:
 
             agent = self._create_agent(
                 agent_id="default",
-                model=model,
+                model=provider.get_default_model(),
                 provider=provider,
                 workspace=workspace,
                 temperature=defaults.temperature,
@@ -76,13 +76,16 @@ class AgentPool:
                 img_fb = agent_config.image_model_fallbacks if agent_config.image_model_fallbacks is not None else defaults.image_model_fallbacks
                 provider = self._build_provider_chain(model, fb_models)
                 image_provider = self._build_provider_chain(img_model, img_fb) if img_model else None
+                # Use the provider's resolved model name (may differ, e.g. "anthropic/kimi-for-coding")
+                resolved_model = provider.get_default_model()
 
                 workspace_str = agent_config.workspace or defaults.workspace
-                workspace = Path(workspace_str).expanduser() / agent_config.id
+                base = Path(workspace_str).expanduser()
+                workspace = base.parent / f"{base.name}-{agent_config.id}"
 
                 agent = self._create_agent(
                     agent_id=agent_config.id,
-                    model=model,
+                    model=resolved_model,
                     provider=provider,
                     workspace=workspace,
                     temperature=agent_config.temperature or defaults.temperature,
@@ -97,9 +100,15 @@ class AgentPool:
 
     def _build_provider_chain(self, primary_model: str, fallback_models: list[str]) -> FallbackProvider:
         """Build a FallbackProvider from primary + fallback model list."""
-        chain = [(self.provider_factory(primary_model, None), primary_model)]
+        def _entry(model: str) -> tuple:
+            p = self.provider_factory(model, None)
+            # Use the provider's resolved default_model (may differ, e.g. "anthropic/kimi-for-coding")
+            resolved = p.get_default_model()
+            return (p, resolved)
+
+        chain = [_entry(primary_model)]
         for fb in fallback_models:
-            chain.append((self.provider_factory(fb, None), fb))
+            chain.append(_entry(fb))
         return FallbackProvider(chain)
 
     def _create_agent(
@@ -117,6 +126,7 @@ class AgentPool:
     ) -> AgentLoop:
         """Create a single AgentLoop instance."""
         workspace.mkdir(parents=True, exist_ok=True)
+        self._init_workspace(workspace, agent_id)
 
         return AgentLoop(
             bus=self.bus,
@@ -141,9 +151,111 @@ class AgentPool:
             agent_pool=self,
         )
 
+    def _init_workspace(self, workspace: Path, agent_id: str) -> None:
+        """Initialize workspace with default files if they don't exist yet."""
+        defaults = {
+            "AGENTS.md": f"""# Agent Instructions
+
+You are a helpful AI assistant. Be concise, accurate, and friendly.
+
+## Scheduled Reminders
+
+Before scheduling reminders, check available skills and follow skill guidance first.
+Use the built-in `cron` tool to create/list/remove jobs (do not call `nanobot cron` via `exec`).
+Get USER_ID and CHANNEL from the current session (e.g., `8281248569` and `telegram` from `telegram:8281248569`).
+
+**Do NOT just write reminders to MEMORY.md** — that won't trigger actual notifications.
+
+## Heartbeat Tasks
+
+`HEARTBEAT.md` is checked on the configured heartbeat interval. Use file tools to manage periodic tasks:
+
+- **Add**: `edit_file` to append new tasks
+- **Remove**: `edit_file` to delete completed tasks
+- **Rewrite**: `write_file` to replace all tasks
+
+When the user asks for a recurring/periodic task, update `HEARTBEAT.md` instead of creating a one-time cron reminder.
+""",
+            "SOUL.md": f"""# Soul
+
+I am {agent_id}, a personal AI assistant.
+
+## Personality
+
+- Helpful and friendly
+- Concise and to the point
+- Curious and eager to learn
+
+## Values
+
+- Accuracy over speed
+- User privacy and safety
+- Transparency in actions
+
+## Communication Style
+
+- Be clear and direct
+- Explain reasoning when helpful
+- Ask clarifying questions when needed
+""",
+            "USER.md": """# User Profile
+
+Information about the user to help personalize interactions.
+
+## Basic Information
+
+- **Name**: (your name)
+- **Timezone**: (your timezone, e.g., UTC+8)
+- **Language**: (preferred language)
+
+## Preferences
+
+- **Communication Style**: Casual / Professional / Technical
+- **Response Length**: Brief / Detailed / Adaptive
+- **Technical Level**: Beginner / Intermediate / Expert
+
+## Work Context
+
+- **Primary Role**: (your role, e.g., developer, researcher)
+- **Main Projects**: (what you're working on)
+
+## Special Instructions
+
+(Any specific instructions for how the assistant should behave)
+""",
+            "TOOLS.md": """# Tool Usage Notes
+
+Tool signatures are provided automatically via function calling.
+This file documents non-obvious constraints and usage patterns.
+
+## exec — Safety Limits
+
+- Commands have a configurable timeout (default 60s)
+- Dangerous commands are blocked (rm -rf, format, dd, shutdown, etc.)
+- Output is truncated at 10,000 characters
+- `restrictToWorkspace` config can limit file access to the workspace
+
+## cron — Scheduled Reminders
+
+- Please refer to cron skill for usage.
+""",
+        }
+        for filename, content in defaults.items():
+            path = workspace / filename
+            if not path.exists():
+                path.write_text(content, encoding="utf-8")
+                logger.info("Initialized {} for agent {}", filename, agent_id)
+
     def register_group_member(self, chat_id: str, agent_id: str) -> None:
         """Record that agent_id is active in chat_id."""
         self._group_members.setdefault(chat_id, set()).add(agent_id)
+
+    def get_agent_account(self, channel: str, agent_id: str) -> str | None:
+        """Return the accountId bound to agent_id on the given channel, or None."""
+        for (ch, account_id), ag_id in self._bindings.items():
+            if ch == channel and ag_id == agent_id:
+                return account_id
+        return None
 
     def get_peer_agents(self, chat_id: str, exclude_agent_id: str) -> dict[str, "AgentLoop"]:
         """Return agent_id -> AgentLoop for all agents in chat_id except exclude_agent_id."""
@@ -172,3 +284,29 @@ class AgentPool:
     def get_default_agent(self) -> AgentLoop | None:
         """Get default agent for backward compatibility."""
         return self._agents.get("default")
+
+    async def route_inbound(self, msg: "InboundMessage") -> None:
+        """Route an inbound message to the correct agent based on account_id metadata."""
+        from nanobot.bus.events import InboundMessage as _IM  # noqa: F401
+        account_id = msg.metadata.get("account_id") if msg.metadata else None
+        agent: AgentLoop | None = None
+        if account_id:
+            agent = self.get_agent(msg.channel, account_id)
+        if agent is None:
+            agent = self.get_default_agent()
+        if agent is None and self._agents:
+            agent = next(iter(self._agents.values()))
+        if agent is not None:
+            await agent.enqueue(msg)
+        else:
+            logger.warning("route_inbound: no agent available for message from {}", msg.channel)
+
+    async def run_bus_router(self) -> None:
+        """Consume the shared bus and route messages to per-agent queues (for non-Feishu channels)."""
+        import asyncio as _asyncio
+        while True:
+            try:
+                msg = await _asyncio.wait_for(self.bus.consume_inbound(), timeout=1.0)
+            except _asyncio.TimeoutError:
+                continue
+            await self.route_inbound(msg)

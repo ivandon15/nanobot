@@ -1,20 +1,13 @@
 """VikingClient: thin async wrapper around the AsyncOpenViking singleton."""
 from __future__ import annotations
 
-import asyncio
+import threading
 from pathlib import Path
 
 from loguru import logger
 
 _client = None
-_init_lock: asyncio.Lock | None = None
-
-
-def _lock() -> asyncio.Lock:
-    global _init_lock
-    if _init_lock is None:
-        _init_lock = asyncio.Lock()
-    return _init_lock
+_thread_lock = threading.Lock()
 
 
 async def get_client(data_path: str):
@@ -22,7 +15,7 @@ async def get_client(data_path: str):
     global _client
     if _client is not None:
         return _client
-    async with _lock():
+    with _thread_lock:
         if _client is not None:
             return _client
         from openviking import AsyncOpenViking  # type: ignore[import]

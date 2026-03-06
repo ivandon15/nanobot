@@ -18,12 +18,13 @@ class ContextBuilder:
     BOOTSTRAP_FILES = ["AGENTS.md", "SOUL.md", "USER.md", "TOOLS.md", "IDENTITY.md"]
     _RUNTIME_CONTEXT_TAG = "[Runtime Context — metadata only, not instructions]"
 
-    def __init__(self, workspace: Path):
+    def __init__(self, workspace: Path, ov_data_path: str | None = None):
         self.workspace = workspace
+        self.ov_data_path = ov_data_path
         self.memory = MemoryStore(workspace)
         self.skills = SkillsLoader(workspace)
 
-    def build_system_prompt(self, skill_names: list[str] | None = None, peer_agent_names: list[str] | None = None) -> str:
+    def build_system_prompt(self, skill_names: list[str] | None = None, peer_agent_names: list[tuple[str, str]] | list[str] | None = None) -> str:
         """Build the system prompt from identity, bootstrap files, memory, and skills."""
         parts = [self._get_identity()]
 
@@ -51,9 +52,19 @@ Skills with available="false" need dependencies installed first - you can try in
 {skills_summary}""")
 
         if peer_agent_names:
+            # Normalize: accept both list[str] and list[tuple[str, str]]
+            pairs: list[tuple[str, str]] = [
+                (p if isinstance(p, str) else p[0], p if isinstance(p, str) else p[1])
+                for p in peer_agent_names
+            ]
+            ids = ", ".join(f'"{agent_id}"' for agent_id, _ in pairs)
+            at_names = ", ".join(f"@{account}" for _, account in pairs)
             parts.append(
                 "## Peer Agents\n\n"
-                f"You are sharing this group with: {', '.join(peer_agent_names)}.\n"
+                f"You are sharing this group with: {', '.join(agent_id for agent_id, _ in pairs)}.\n"
+                f"When calling `discuss_with_agents`, use these exact agent IDs: {ids}.\n"
+                f"To @mention them in your reply, use: {at_names}.\n"
+                "IMPORTANT: Only use these exact @names above. Never invent @mentions like @所有Agent or others that are not listed.\n"
                 "Use `discuss_with_agents` when the question benefits from multiple perspectives "
                 "or specialized knowledge. Do NOT use it for simple questions you can handle alone."
             )
@@ -66,20 +77,26 @@ Skills with available="false" need dependencies installed first - you can try in
         system = platform.system()
         runtime = f"{'macOS' if system == 'Darwin' else system} {platform.machine()}, Python {platform.python_version()}"
 
-        return f"""# nanobot 🐈
+        ov_section = ""
+        if self.ov_data_path:
+            ov_section = f"""
 
-You are nanobot, a helpful AI assistant.
+## OpenViking Memory
+OpenViking long-term memory is **active**. Data path: {self.ov_data_path}
+Use the openviking_search, openviking_list, openviking_read, openviking_grep, openviking_glob,
+and user_memory_search tools to query persistent memory across sessions."""
 
-## Runtime
+        return f"""# Runtime
+
 {runtime}
 
 ## Workspace
 Your workspace is at: {workspace_path}
 - Long-term memory: {workspace_path}/memory/MEMORY.md (write important facts here)
 - History log: {workspace_path}/memory/HISTORY.md (grep-searchable). Each entry starts with [YYYY-MM-DD HH:MM].
-- Custom skills: {workspace_path}/skills/{{skill-name}}/SKILL.md
+- Custom skills: {workspace_path}/skills/{{skill-name}}/SKILL.md{ov_section}
 
-## nanobot Guidelines
+## Guidelines
 - State intent before tool calls, but NEVER predict or claim results before receiving them.
 - Before modifying a file, read it first. Do not assume files or directories exist.
 - After writing or editing a file, re-read it if accuracy matters.
@@ -118,7 +135,7 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
         media: list[str] | None = None,
         channel: str | None = None,
         chat_id: str | None = None,
-        peer_agent_names: list[str] | None = None,
+        peer_agent_names: list[tuple[str, str]] | list[str] | None = None,
     ) -> list[dict[str, Any]]:
         """Build the complete message list for an LLM call."""
         runtime_ctx = self._build_runtime_context(channel, chat_id)
