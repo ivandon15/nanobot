@@ -260,15 +260,12 @@ This file documents non-obvious constraints and usage patterns.
     def get_peer_agents(self, chat_id: str, exclude_agent_id: str) -> dict[str, "AgentLoop"]:
         """Return agent_id -> AgentLoop for all agents in chat_id except exclude_agent_id.
 
-        Falls back to all agents in the pool when no group membership has been recorded yet,
-        so peers are available from the very first message even if they haven't spoken yet.
+        Always includes all agents in the pool as candidates, since they are all
+        configured peers. _group_members is used to track membership but does not
+        restrict the candidate set — this ensures peers are visible even before
+        they have spoken in the group.
         """
-        members = self._group_members.get(chat_id)
-        if members:
-            candidates = members
-        else:
-            # No membership recorded yet — treat every agent in the pool as a potential peer.
-            candidates = set(self._agents.keys())
+        candidates = set(self._agents.keys()) | self._group_members.get(chat_id, set())
         return {
             aid: self._agents[aid]
             for aid in candidates
