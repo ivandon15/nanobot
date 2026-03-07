@@ -450,6 +450,13 @@ Uses **WebSocket** long connection — no public IP required.
 > `encryptKey` and `verificationToken` are optional for Long Connection mode.
 > `allowFrom`: Add your open_id (find it in nanobot logs when you message the bot). Use `["*"]` to allow all users.
 
+### Multi-Agent Group Chat
+
+Add multiple bot accounts to the same Feishu group. Each bot responds when @mentioned.
+Bots can @mention each other — the mentioned bot will see the message and respond independently.
+
+Requires `require_mention: true` (default). Add all bot accounts under `feishu.accounts`.
+
 **3. Run**
 
 ```bash
