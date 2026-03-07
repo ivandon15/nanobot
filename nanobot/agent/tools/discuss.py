@@ -79,17 +79,11 @@ class DiscussTool(Tool):
 
         agent_ids = [_resolve(aid) for aid in agent_ids]
 
-        # Send a visible "consulting" message to the group
-        if self._bus and ctx:
+        channel: str | None = None
+        chat_id: str | None = None
+        metadata: dict = {}
+        if ctx:
             channel, chat_id, metadata = ctx
-            from nanobot.bus.events import OutboundMessage
-            names = ", ".join(agent_ids)
-            meta = dict(metadata)
-            await self._bus.publish_outbound(OutboundMessage(
-                channel=channel, chat_id=chat_id,
-                content=f"💬 **[→ {names}]**\n\n{question}",
-                metadata=meta,
-            ))
 
         tasks: dict[str, asyncio.Task] = {}
         for aid in agent_ids:
@@ -97,12 +91,29 @@ class DiscussTool(Tool):
             if agent is None:
                 continue
 
+            # Resolve the Feishu account name for this peer (for @mention display)
+            at_name = aid
+            if self._get_agent_account and channel:
+                account = self._get_agent_account(channel, aid)
+                if account:
+                    at_name = account
+
+            # Send a visible "@AccountName question" message from the calling agent's account.
+            # _build_post_with_mentions in feishu.py will convert this to a real Feishu @mention.
+            if self._bus and channel and chat_id:
+                from nanobot.bus.events import OutboundMessage
+                await self._bus.publish_outbound(OutboundMessage(
+                    channel=channel, chat_id=chat_id,
+                    content=f"@{at_name} {question}",
+                    metadata=dict(metadata),
+                ))
+
             # Build reply metadata using the peer's own account_id so the
             # response appears from the peer's Feishu account in the group.
             reply_channel = reply_chat_id = None
             reply_metadata: dict | None = None
-            if ctx:
-                channel, chat_id, metadata = ctx
+            inbound_metadata: dict = {}
+            if channel and chat_id:
                 reply_channel = channel
                 reply_chat_id = chat_id
                 reply_metadata = dict(metadata)
@@ -110,16 +121,19 @@ class DiscussTool(Tool):
                     peer_account = self._get_agent_account(channel, aid)
                     if peer_account:
                         reply_metadata["account_id"] = peer_account
+                # Pass group context so the peer agent can also use discuss_with_agents
+                inbound_metadata = {"chat_type": "group"}
 
             tasks[aid] = asyncio.create_task(
                 agent.process_direct(
                     content=question,
-                    session_key=f"discuss:{aid}:{chat_id if ctx else 'default'}",
-                    channel=channel if ctx else "discuss",
-                    chat_id=chat_id if ctx else "discuss",
+                    session_key=f"discuss:{aid}:{chat_id or 'default'}",
+                    channel=channel or "discuss",
+                    chat_id=chat_id or "discuss",
                     reply_channel=reply_channel,
                     reply_chat_id=reply_chat_id,
                     reply_metadata=reply_metadata,
+                    inbound_metadata=inbound_metadata,
                 )
             )
         if not tasks:

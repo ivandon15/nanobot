@@ -616,10 +616,12 @@ class AgentLoop:
         reply_channel: str | None = None,
         reply_chat_id: str | None = None,
         reply_metadata: dict | None = None,
+        inbound_metadata: dict | None = None,
     ) -> str:
         """Process a message directly (for CLI or cron usage)."""
         await self._connect_mcp()
-        msg = InboundMessage(channel=channel, sender_id="user", chat_id=chat_id, content=content)
+        msg = InboundMessage(channel=channel, sender_id="user", chat_id=chat_id, content=content,
+                             metadata=inbound_metadata or {})
         response = await self._process_message(msg, session_key=session_key, on_progress=on_progress)
 
         # If _process_message returned None it means the agent used the message tool
