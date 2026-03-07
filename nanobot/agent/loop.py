@@ -128,22 +128,6 @@ class AgentLoop:
         self._inbound: asyncio.Queue[InboundMessage] = asyncio.Queue()  # Per-agent inbound queue
         self._register_default_tools()
 
-    def _refresh_discuss_tool(self, chat_id: str) -> None:
-        """Register or update DiscussTool with current group peers."""
-        if not self._agent_pool or not self._agent_id:
-            return
-        from nanobot.agent.tools.discuss import DiscussTool
-        peers = self._agent_pool.get_peer_agents(chat_id, self._agent_id)
-        if not peers:
-            return
-        if self.tools.get("discuss_with_agents") is None:
-            self.tools.register(DiscussTool(
-                get_peers=lambda cid=chat_id: self._agent_pool.get_peer_agents(cid, self._agent_id),
-                bus=self.bus,
-                get_context=lambda: self._current_context,
-                get_agent_account=lambda ch, aid: self._agent_pool.get_agent_account(ch, aid),
-            ))
-
     def _register_default_tools(self) -> None:
         """Register the default set of tools."""
         allowed_dir = self.workspace if self.restrict_to_workspace else None
@@ -426,7 +410,6 @@ class AgentLoop:
 
         if msg.metadata.get("chat_type") == "group" and self._agent_pool and self._agent_id:
             self._agent_pool.register_group_member(msg.chat_id, self._agent_id)
-            self._refresh_discuss_tool(msg.chat_id)
 
         # Slash commands
         cmd = msg.content.strip().lower()

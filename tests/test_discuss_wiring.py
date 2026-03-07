@@ -40,3 +40,20 @@ def test_no_members_returns_all_agents_as_fallback(tmp_path):
     pool = AgentPool(config, MagicMock(spec=MessageBus), _factory)
     peers = pool.get_peer_agents("oc_unknown", "agent1")
     assert set(peers.keys()) == {"agent2"}
+
+
+def test_discuss_tool_not_registered_in_agent(tmp_path):
+    """discuss_with_agents tool should NOT be registered — agents use message tool instead."""
+    from unittest.mock import AsyncMock
+    from nanobot.agent.loop import AgentLoop
+    from nanobot.bus.queue import MessageBus
+
+    bus = MagicMock(spec=MessageBus)
+    bus.publish_outbound = AsyncMock()
+    agent = AgentLoop(
+        bus=bus,
+        provider=MagicMock(),
+        workspace=tmp_path,
+        agent_id="test",
+    )
+    assert agent.tools.get("discuss_with_agents") is None
