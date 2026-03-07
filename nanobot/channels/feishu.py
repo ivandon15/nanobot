@@ -1105,7 +1105,14 @@ class FeishuChannel(BaseChannel):
 
             # Skip bot messages
             if sender.sender_type == "bot":
-                return
+                # Ignore our own echoed messages
+                if message_id in self._sent_message_ids.get(account_id, {}):
+                    return
+                # For other bots' messages: only process if this bot is @mentioned
+                # (require_mention check happens below in the group branch)
+                # If not a group message, skip all bot DMs
+                if message.chat_type != "group":
+                    return
 
             # Route to agent via AgentPool
             if self.agent_pool:

@@ -1,4 +1,5 @@
 import asyncio
+import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 from nanobot.channels.feishu import FeishuChannel, _should_use_card
 from nanobot.bus.events import OutboundMessage
@@ -131,3 +132,75 @@ def test_sent_message_ids_tracked_per_account():
     )
     asyncio.run(ch.send(msg))
     assert "om_sent123" in ch._sent_message_ids.get("Operator", set())
+
+
+def _make_group_event(message_id, sender_open_id, sender_type, chat_id, content, mentions=None, account_id="Operator"):
+    """Build a minimal mock P2ImMessageReceiveV1 event."""
+    event = MagicMock()
+    event.event.sender.sender_type = sender_type
+    event.event.sender.sender_id.open_id = sender_open_id
+    event.event.message.message_id = message_id
+    event.event.message.chat_id = chat_id
+    event.event.message.chat_type = "group"
+    event.event.message.message_type = "text"
+    event.event.message.content = '{"text": "' + content + '"}'
+    event.event.message.mentions = mentions or []
+    return event
+
+
+@pytest.mark.asyncio
+async def test_bot_message_skipped_if_self_sent():
+    """Bot's own echoed message is ignored."""
+    ch = make_channel()
+    ch._loop = asyncio.get_event_loop()
+    ch._bot_open_ids["Operator"] = "ou_operator"
+    ch._record_sent("Operator", "om_self123")
+
+    data = _make_group_event("om_self123", "ou_operator", "bot", "oc_g1", "hello")
+    ch.agent_pool = MagicMock()
+
+    await ch._on_message(data, "Operator")
+    ch.agent_pool.get_agent.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_bot_message_processed_when_mentioned():
+    """Bot message from another bot is processed when this bot is @mentioned."""
+    ch = make_channel()
+    ch._loop = asyncio.get_event_loop()
+    ch._bot_open_ids["Operator"] = "ou_operator"
+    ch._bot_open_ids["VicePresident"] = "ou_vp"
+    ch.config.require_mention = True
+
+    mention = MagicMock()
+    mention.key = "@_user_1"
+    mention.id.open_id = "ou_operator"
+    mention.name = "Operator"
+    data = _make_group_event("om_other123", "ou_vp", "bot", "oc_g1", "@Operator hi", [mention])
+
+    ch.agent_pool = MagicMock()
+    ch.agent_pool.get_agent.return_value = MagicMock()
+    ch.agent_pool.route_inbound = AsyncMock()
+    ch._clients["Operator"] = MagicMock()
+    ch._add_reaction = AsyncMock(return_value="rxn1")
+
+    await ch._on_message(data, "Operator")
+    ch.agent_pool.route_inbound.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_bot_message_skipped_when_not_mentioned():
+    """Bot message from another bot is ignored when this bot is not @mentioned."""
+    ch = make_channel()
+    ch._loop = asyncio.get_event_loop()
+    ch._bot_open_ids["Operator"] = "ou_operator"
+    ch._bot_open_ids["VicePresident"] = "ou_vp"
+    ch.config.require_mention = True
+
+    data = _make_group_event("om_other456", "ou_vp", "bot", "oc_g1", "just talking", [])
+
+    ch.agent_pool = MagicMock()
+    ch.agent_pool.get_agent.return_value = MagicMock()
+    ch.agent_pool.route_inbound = AsyncMock()
+    await ch._on_message(data, "Operator")
+    ch.agent_pool.route_inbound.assert_not_called()
