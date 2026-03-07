@@ -21,8 +21,7 @@ class DiscussTool(Tool):
     def description(self) -> str:
         return (
             "Consult other agents in this group chat for their perspective on a question. "
-            "Use when the question benefits from multiple viewpoints or specialized knowledge. "
-            "Do NOT use for simple questions you can answer alone. "
+            "This is the ONLY way to involve peer agents — do NOT use the `message` tool to @mention them. "
             "Returns each agent's response; you synthesize and reply to the user."
         )
 

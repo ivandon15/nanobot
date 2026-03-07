@@ -1098,7 +1098,6 @@ class FeishuChannel(BaseChannel):
             event = data.event
             message = event.message
             sender = event.sender
-
             # Deduplication check — keyed per account so multiple bots in the same
             # group each process the message independently.
             message_id = message.message_id

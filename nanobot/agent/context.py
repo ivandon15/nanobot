@@ -58,15 +58,12 @@ Skills with available="false" need dependencies installed first - you can try in
                 for p in peer_agent_names
             ]
             ids = ", ".join(f'"{agent_id}"' for agent_id, _ in pairs)
-            at_names = ", ".join(f"@{account}" for _, account in pairs)
             parts.append(
                 "## Peer Agents\n\n"
                 f"You are sharing this group with: {', '.join(agent_id for agent_id, _ in pairs)}.\n"
-                f"When calling `discuss_with_agents`, use these exact agent IDs: {ids}.\n"
-                f"To @mention them in your reply, use: {at_names}.\n"
-                "IMPORTANT: Only use these exact @names above. Never invent @mentions like @所有Agent or others that are not listed.\n"
-                "Use `discuss_with_agents` when the question benefits from multiple perspectives "
-                "or specialized knowledge. Do NOT use it for simple questions you can handle alone."
+                f"To involve a peer, call `discuss_with_agents` with their exact agent ID: {ids}.\n"
+                "CRITICAL: `discuss_with_agents` is the ONLY way to get a response from a peer. "
+                "The `message` tool does NOT trigger peers — never use it to @mention them."
             )
 
         return "\n\n---\n\n".join(parts)
@@ -103,7 +100,7 @@ Your workspace is at: {workspace_path}
 - If a tool call fails, analyze the error before retrying with a different approach.
 - Ask for clarification when the request is ambiguous.
 
-Reply directly with text for conversations. Only use the 'message' tool to send to a *different* channel or chat (not the current one). To consult peer agents sharing this group, use `discuss_with_agents` — never use `message` to @mention peers."""
+Reply directly with text for conversations. Only use the 'message' tool to send to a *different* channel or chat (not the current one). To involve peer agents in this group, ALWAYS use `discuss_with_agents` — the `message` tool does NOT trigger peers."""
 
     @staticmethod
     def _build_runtime_context(channel: str | None, chat_id: str | None) -> str:
