@@ -204,3 +204,28 @@ async def test_bot_message_skipped_when_not_mentioned():
     ch.agent_pool.route_inbound = AsyncMock()
     await ch._on_message(data, "Operator")
     ch.agent_pool.route_inbound.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_group_message_from_bot_uses_account_name():
+    """When a bot sends a group message, its account_id is used as sender name, not Contact API."""
+    ch = make_channel()
+    ch._bot_open_ids["VicePresident"] = "ou_vp"
+    ch._clients["Operator"] = MagicMock()
+
+    captured = []
+    async def fake_route(msg):
+        captured.append(msg)
+    ch.agent_pool = MagicMock()
+    ch.agent_pool.route_inbound = AsyncMock(side_effect=fake_route)
+
+    await ch._handle_group_message(
+        sender_id="ou_vp",
+        chat_id="oc_g1",
+        content="what do you think?",
+        message_id="om_1",
+        mentions=[],
+        account_id="Operator",
+        sender_type="bot",
+    )
+    assert captured[0].content.startswith("[VicePresident]:")

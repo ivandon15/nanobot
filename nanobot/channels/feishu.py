@@ -552,6 +552,7 @@ class FeishuChannel(BaseChannel):
         account_id: str,
         media: list[str] | None = None,
         metadata: dict | None = None,
+        sender_type: str = "user",
     ) -> None:
         """Handle group message: strip bot mention, inject sender name, forward to bus."""
         # Strip bot mention from content
@@ -559,12 +560,19 @@ class FeishuChannel(BaseChannel):
             content = _strip_bot_mention(content, mentions)
 
         # Sender name injection
-        client = self._clients.get(account_id)
-        if client and sender_id:
-            loop = asyncio.get_running_loop()
-            name = await loop.run_in_executor(None, self._fetch_sender_name_sync, sender_id, client)
-            if name:
-                content = f"[{name}]: {content}" if content else f"[{name}]"
+        if sender_type == "bot":
+            bot_name = next(
+                (aid for aid, oid in self._bot_open_ids.items() if oid == sender_id),
+                sender_id,
+            )
+            content = f"[{bot_name}]: {content}" if content else f"[{bot_name}]"
+        else:
+            client = self._clients.get(account_id)
+            if client and sender_id:
+                loop = asyncio.get_running_loop()
+                name = await loop.run_in_executor(None, self._fetch_sender_name_sync, sender_id, client)
+                if name:
+                    content = f"[{name}]: {content}" if content else f"[{name}]"
 
         # 4. Forward to the correct agent (or shared bus as fallback)
         from nanobot.bus.events import InboundMessage
@@ -1217,6 +1225,7 @@ class FeishuChannel(BaseChannel):
                     account_id=account_id,
                     media=media_paths,
                     metadata=base_metadata,
+                    sender_type=sender.sender_type,
                 )
             else:
                 await self._handle_message(
