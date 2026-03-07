@@ -29,7 +29,7 @@ def test_fetch_bot_open_id_returns_open_id():
         mock_requests.post.return_value = mock_token_resp
         mock_requests.get.return_value = mock_bot_resp
 
-        result = ch._fetch_bot_open_id_sync(mock_client)
+        result = ch._fetch_bot_open_id_sync("aid", "asec")
     assert result == "ou_botid123"
 
 
@@ -45,7 +45,7 @@ def test_fetch_bot_open_id_returns_none_on_failure():
         mock_requests.post.return_value = mock_token_resp
         mock_requests.get.return_value = mock_bot_resp
 
-        result = ch._fetch_bot_open_id_sync(mock_client)
+        result = ch._fetch_bot_open_id_sync("aid", "asec")
     assert result is None
 
 
@@ -86,16 +86,17 @@ def test_group_allow_from_blocks_unlisted_group():
     bus.publish_inbound = AsyncMock()
     ch = FeishuChannel(cfg, bus)
 
-    async def run():
-        await ch._handle_group_message(
-            sender_id="ou_user1",
-            chat_id="oc_blocked",
-            content="hello",
-            message_id="msg1",
-            mentions=[],
-            account_id="default",
-        )
-    asyncio.run(run())
+    event = MagicMock()
+    event.event.sender.sender_type = "user"
+    event.event.sender.sender_id.open_id = "ou_user1"
+    event.event.message.message_id = "msg1"
+    event.event.message.chat_id = "oc_blocked"
+    event.event.message.chat_type = "group"
+    event.event.message.message_type = "text"
+    event.event.message.content = '{"text": "hello"}'
+    event.event.message.mentions = []
+
+    asyncio.run(ch._on_message(event, "default"))
     bus.publish_inbound.assert_not_called()
 
 
