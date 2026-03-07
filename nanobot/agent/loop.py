@@ -128,6 +128,18 @@ class AgentLoop:
         self._inbound: asyncio.Queue[InboundMessage] = asyncio.Queue()  # Per-agent inbound queue
         self._register_default_tools()
 
+    def _get_peer_names(self) -> list[str]:
+        """Return account names of all known peer agents (for MessageTool guard)."""
+        if not self._agent_pool or not self._agent_id or not self._current_context:
+            return []
+        channel, chat_id, _ = self._current_context
+        peers = self._agent_pool.get_peer_agents(chat_id, self._agent_id)
+        names = []
+        for aid in peers:
+            account = self._agent_pool.get_agent_account(channel, aid)
+            names.append(account or aid)
+        return names
+
     def _refresh_discuss_tool(self, chat_id: str) -> None:
         """Register or update DiscussTool with current group peers."""
         if not self._agent_pool or not self._agent_id:
@@ -157,7 +169,10 @@ class AgentLoop:
         ))
         self.tools.register(WebSearchTool(api_key=self.brave_api_key, proxy=self.web_proxy))
         self.tools.register(WebFetchTool(proxy=self.web_proxy))
-        self.tools.register(MessageTool(send_callback=self.bus.publish_outbound))
+        self.tools.register(MessageTool(
+            send_callback=self.bus.publish_outbound,
+            get_peer_names=self._get_peer_names,
+        ))
         self.tools.register(SpawnTool(manager=self.subagents))
         if self.cron_service:
             self.tools.register(CronTool(self.cron_service))
