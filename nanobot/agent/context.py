@@ -57,14 +57,16 @@ Skills with available="false" need dependencies installed first - you can try in
                 (p if isinstance(p, str) else p[0], p if isinstance(p, str) else p[1])
                 for p in peer_agent_names
             ]
-            names = ", ".join(f"{agent_id} (@{account})" for agent_id, account in pairs)
+            ids = ", ".join(f'"{agent_id}"' for agent_id, _ in pairs)
+            at_names = ", ".join(f"@{account}" for _, account in pairs)
             parts.append(
                 "## Peer Agents\n\n"
-                f"You are sharing this group with: {names}.\n"
-                "To involve a peer, use the `message` tool to send a message to this group "
-                "with @AccountName in the content — they will see it and respond.\n"
-                "Example: `message(content='@VicePresident what do you think about X?')`\n"
-                "The peer bot will respond directly in the group. You do NOT need to wait for their reply."
+                f"You are sharing this group with: {', '.join(agent_id for agent_id, _ in pairs)}.\n"
+                f"When calling `discuss_with_agents`, use these exact agent IDs: {ids}.\n"
+                f"To @mention them in your reply, use: {at_names}.\n"
+                "IMPORTANT: Only use these exact @names above. Never invent @mentions like @所有Agent or others that are not listed.\n"
+                "Use `discuss_with_agents` when the question benefits from multiple perspectives "
+                "or specialized knowledge. Do NOT use it for simple questions you can handle alone."
             )
 
         return "\n\n---\n\n".join(parts)
@@ -101,7 +103,7 @@ Your workspace is at: {workspace_path}
 - If a tool call fails, analyze the error before retrying with a different approach.
 - Ask for clarification when the request is ambiguous.
 
-Reply directly with text for conversations. To involve a peer agent in this group, use the `message` tool with @AccountName in the content — they will see it and respond."""
+Reply directly with text for conversations. Only use the 'message' tool to send to a *different* channel or chat (not the current one). To consult peer agents sharing this group, use `discuss_with_agents` — never use `message` to @mention peers."""
 
     @staticmethod
     def _build_runtime_context(channel: str | None, chat_id: str | None) -> str:
