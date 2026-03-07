@@ -1,5 +1,7 @@
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 from nanobot.channels.feishu import FeishuChannel, _should_use_card
+from nanobot.bus.events import OutboundMessage
 
 
 def make_channel():
@@ -111,3 +113,21 @@ def test_should_use_card_detects_table():
 
 def test_should_use_card_plain_text():
     assert _should_use_card("just plain text") is False
+
+
+def test_sent_message_ids_tracked_per_account():
+    """After send(), the returned message_id is stored in _sent_message_ids for that account."""
+    ch = make_channel()
+    ch._clients["Operator"] = MagicMock()
+
+    mock_response = MagicMock()
+    mock_response.success.return_value = True
+    mock_response.data.message_id = "om_sent123"
+    ch._clients["Operator"].im.v1.message.create.return_value = mock_response
+
+    msg = OutboundMessage(
+        channel="feishu", chat_id="oc_group1", content="hello",
+        metadata={"account_id": "Operator"},
+    )
+    asyncio.run(ch.send(msg))
+    assert "om_sent123" in ch._sent_message_ids.get("Operator", set())

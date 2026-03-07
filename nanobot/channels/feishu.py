@@ -366,6 +366,7 @@ class FeishuChannel(BaseChannel):
         self._processed_message_ids: OrderedDict[str, None] = OrderedDict()  # Ordered dedup cache
         self._loop: asyncio.AbstractEventLoop | None = None
         self._bot_open_ids: dict[str, str] = {}  # account_id -> bot open_id
+        self._sent_message_ids: dict[str, OrderedDict[str, None]] = {}  # account_id -> sent msg_ids
 
     def _get_accounts(self) -> dict[str, dict[str, str]]:
         """Get accounts dict with backward compatibility.
@@ -953,7 +954,7 @@ class FeishuChannel(BaseChannel):
 
         return None, f"[{msg_type}: download failed]"
 
-    def _send_message_sync(self, receive_id_type: str, receive_id: str, msg_type: str, content: str, client: Any = None) -> bool:
+    def _send_message_sync(self, receive_id_type: str, receive_id: str, msg_type: str, content: str, client: Any = None) -> str | None:
         """Send a single message (text/image/file/interactive) synchronously."""
         import time as _time
         if not client:
@@ -976,16 +977,26 @@ class FeishuChannel(BaseChannel):
                         "Failed to send Feishu {} message: code={}, msg={}, log_id={}",
                         msg_type, response.code, response.msg, response.get_log_id()
                     )
-                    return False
-                logger.debug("Feishu {} message sent to {}", msg_type, receive_id)
-                return True
+                    return None
+                msg_id = response.data.message_id if response.data else None
+                logger.debug("Feishu {} message sent to {}, msg_id={}", msg_type, receive_id, msg_id)
+                return msg_id
             except Exception as e:
                 last_exc = e
                 if attempt == 0:
                     logger.warning("Error sending Feishu {} message (retrying): {}", msg_type, e)
                     _time.sleep(1)
         logger.error("Error sending Feishu {} message: {}", msg_type, last_exc)
-        return False
+        return None
+
+    def _record_sent(self, account_id: str | None, message_id: str | None) -> None:
+        """Store a sent message_id to prevent self-echo processing."""
+        if not account_id or not message_id:
+            return
+        cache = self._sent_message_ids.setdefault(account_id, OrderedDict())
+        cache[message_id] = None
+        while len(cache) > 500:
+            cache.popitem(last=False)
 
     async def send(self, msg: OutboundMessage) -> None:
         """Send a message through Feishu, including media (images/files) if present."""
@@ -1031,10 +1042,11 @@ class FeishuChannel(BaseChannel):
                 post_payload = self._build_post_with_mentions(msg.content)
                 if post_payload:
                     logger.debug("Sending post with mentions: {}", post_payload)
-                    await loop.run_in_executor(
+                    sent_id = await loop.run_in_executor(
                         None, self._send_message_sync,
                         receive_id_type, msg.chat_id, "post", json.dumps(post_payload, ensure_ascii=False), client,
                     )
+                    self._record_sent(account_id, sent_id)
                 else:
                     use_card = (
                         render_mode == "card" or
@@ -1042,15 +1054,17 @@ class FeishuChannel(BaseChannel):
                     )
                     if use_card:
                         card = {"config": {"wide_screen_mode": True}, "elements": self._build_card_elements(msg.content)}
-                        await loop.run_in_executor(
+                        sent_id = await loop.run_in_executor(
                             None, self._send_message_sync,
                             receive_id_type, msg.chat_id, "interactive", json.dumps(card, ensure_ascii=False), client,
                         )
+                        self._record_sent(account_id, sent_id)
                     else:
-                        await loop.run_in_executor(
+                        sent_id = await loop.run_in_executor(
                             None, self._send_message_sync,
                             receive_id_type, msg.chat_id, "text", json.dumps({"text": msg.content}, ensure_ascii=False), client,
                         )
+                        self._record_sent(account_id, sent_id)
 
             # Delete the "thinking" reaction after final reply (not on progress messages)
             if not is_progress and msg.metadata:
