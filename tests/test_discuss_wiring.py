@@ -34,7 +34,9 @@ def test_get_peer_agents_excludes_self(tmp_path):
     assert "agent2" in peers
     assert "agent1" not in peers
 
-def test_no_members_returns_empty(tmp_path):
+def test_no_members_returns_all_agents_as_fallback(tmp_path):
+    """When no group membership recorded, all agents except self are returned as peers."""
     config = _two_agent_config(tmp_path)
     pool = AgentPool(config, MagicMock(spec=MessageBus), _factory)
-    assert pool.get_peer_agents("oc_unknown", "agent1") == {}
+    peers = pool.get_peer_agents("oc_unknown", "agent1")
+    assert set(peers.keys()) == {"agent2"}

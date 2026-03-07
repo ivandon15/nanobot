@@ -1104,6 +1104,7 @@ class FeishuChannel(BaseChannel):
             chat_id = message.chat_id
             chat_type = message.chat_type
             msg_type = message.message_type
+            logger.debug("Feishu message: chat_type={} chat_id={} sender_id={}", chat_type, chat_id, sender_id)
 
             # Parse content first (before adding reaction, so we can skip early)
             content_parts = []
