@@ -122,8 +122,8 @@ class AgentLoop:
         self._consolidating: set[str] = set()  # Session keys with consolidation in progress
         self._consolidation_tasks: set[asyncio.Task] = set()  # Strong refs to in-flight tasks
         self._consolidation_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
+        self._session_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
         self._active_tasks: dict[str, list[asyncio.Task]] = {}  # session_key -> tasks
-        self._processing_lock = asyncio.Lock()
         self._current_context: tuple[str, str, dict] | None = None  # (channel, chat_id, metadata)
         self._inbound: asyncio.Queue[InboundMessage] = asyncio.Queue()  # Per-agent inbound queue
         self._register_default_tools()
@@ -353,8 +353,9 @@ class AgentLoop:
         ))
 
     async def _dispatch(self, msg: InboundMessage) -> None:
-        """Process a message under the global lock."""
-        async with self._processing_lock:
+        """Process a message under a per-session lock."""
+        lock = self._session_locks.setdefault(msg.session_key, asyncio.Lock())
+        async with lock:
             try:
                 response = await self._process_message(msg)
                 if response is not None:
@@ -622,7 +623,9 @@ class AgentLoop:
         await self._connect_mcp()
         msg = InboundMessage(channel=channel, sender_id="user", chat_id=chat_id, content=content,
                              metadata=inbound_metadata or {})
-        response = await self._process_message(msg, session_key=session_key, on_progress=on_progress)
+        lock = self._session_locks.setdefault(session_key, asyncio.Lock())
+        async with lock:
+            response = await self._process_message(msg, session_key=session_key, on_progress=on_progress)
 
         # If _process_message returned None it means the agent used the message tool
         # to send directly. Recover the content from the tool so callers (e.g. DiscussTool)
