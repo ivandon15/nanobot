@@ -116,12 +116,11 @@ class DiscussTool(Tool):
                 reply_channel = channel
                 reply_chat_id = chat_id
                 reply_metadata = dict(metadata)
-                if self._get_agent_account:
-                    peer_account = self._get_agent_account(channel, aid)
-                    if peer_account:
-                        reply_metadata["account_id"] = peer_account
-                # Pass group context so the peer agent can also use discuss_with_agents
-                inbound_metadata = {"chat_type": "group"}
+                peer_account = self._get_agent_account(channel, aid) if self._get_agent_account else None
+                if peer_account:
+                    reply_metadata["account_id"] = peer_account
+                # Pass group context + peer's account_id so _process_message uses the right Feishu client
+                inbound_metadata = {"chat_type": "group", "account_id": peer_account or aid}
 
             tasks[aid] = asyncio.create_task(
                 agent.process_direct(
