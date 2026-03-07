@@ -11,8 +11,12 @@ async def test_discuss_calls_peers_and_returns_responses():
     peer_b.process_direct = AsyncMock(return_value="I think Y")
     tool = DiscussTool(peers={"alice": peer_a, "bob": peer_b})
     result = await tool.execute(question="What do you think?", agent_ids=["alice", "bob"])
-    assert "I think X" in result
-    assert "I think Y" in result
+    # Peers have replied directly in the group — result tells caller not to repeat
+    assert "alice" in result
+    assert "bob" in result
+    assert "replied directly" in result
+    peer_a.process_direct.assert_called_once()
+    peer_b.process_direct.assert_called_once()
 
 @pytest.mark.asyncio
 async def test_discuss_skips_unknown_agents():
@@ -20,7 +24,8 @@ async def test_discuss_skips_unknown_agents():
     peer_a.process_direct = AsyncMock(return_value="response")
     tool = DiscussTool(peers={"alice": peer_a})
     result = await tool.execute(question="Q", agent_ids=["alice", "unknown"])
-    assert "response" in result
+    assert "alice" in result
+    assert "replied directly" in result
 
 @pytest.mark.asyncio
 async def test_discuss_handles_timeout():

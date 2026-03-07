@@ -35,8 +35,9 @@ async def test_discuss_publishes_visible_at_mention():
     # process_direct must have been called
     peer.process_direct.assert_called_once()
 
-    # Result must contain peer's response
-    assert "I am Operator." in result
+    # Result tells caller not to repeat the peer's reply
+    assert "operator" in result.lower()
+    assert "replied directly" in result
 
 
 @pytest.mark.asyncio

@@ -61,9 +61,10 @@ Skills with available="false" need dependencies installed first - you can try in
             parts.append(
                 "## Peer Agents\n\n"
                 f"You are sharing this group with: {', '.join(agent_id for agent_id, _ in pairs)}.\n"
-                f"To involve a peer, call `discuss_with_agents` with their exact agent ID: {ids}.\n"
+                f"To involve a peer (ask them something, call them out, get their input), call `discuss_with_agents` with their exact agent ID: {ids}.\n"
                 "CRITICAL: `discuss_with_agents` is the ONLY way to get a response from a peer. "
-                "The `message` tool does NOT trigger peers — never use it to @mention them."
+                "The `message` tool does NOT trigger peers — never use it to @mention them. "
+                "After calling `discuss_with_agents`, the peer has already replied directly in the group — do NOT repeat or summarize what they said."
             )
 
         return "\n\n---\n\n".join(parts)

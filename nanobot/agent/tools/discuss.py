@@ -141,7 +141,7 @@ class DiscussTool(Tool):
         for aid, task in tasks.items():
             try:
                 response = await asyncio.wait_for(task, timeout=self.timeout)
-                results.append(f"**{aid}**: {response}")
+                results.append(f"**{aid}** has replied directly in the group chat. Do NOT repeat or summarize their reply — they already spoke.")
             except asyncio.TimeoutError:
                 results.append(f"**{aid}**: (timed out after {self.timeout}s)")
                 logger.warning("DiscussTool: agent '{}' timed out", aid)
