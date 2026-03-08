@@ -239,7 +239,7 @@ async def test_reply_message_includes_quoted_content():
     from nanobot.bus.queue import MessageBus
     from nanobot.bus.events import InboundMessage
 
-    cfg = FeishuConfig(enabled=True, app_id="aid", app_secret="asec", allow_from=["*"])
+    cfg = FeishuConfig(enabled=True, app_id="aid", app_secret="asec", allow_from=["ou_user1"])
     bus = MagicMock(spec=MessageBus)
     bus.publish_inbound = AsyncMock()
     ch = FeishuChannel(cfg, bus)
@@ -270,7 +270,7 @@ async def test_reply_message_includes_quoted_content():
     event_data.event.sender.sender_id = MagicMock()
     event_data.event.sender.sender_id.open_id = "ou_user1"
 
-    await ch._handle_message_event(event_data, account_id="default")
+    await ch._on_message(event_data, account_id="default")
 
     assert bus.publish_inbound.called
     published: InboundMessage = bus.publish_inbound.call_args[0][0]
@@ -314,7 +314,7 @@ async def test_group_reply_message_includes_quoted_content():
     event_data.event.sender.sender_id = MagicMock()
     event_data.event.sender.sender_id.open_id = "ou_user2"
 
-    await ch._handle_message_event(event_data, account_id="default")
+    await ch._on_message(event_data, account_id="default")
 
     assert bus.publish_inbound.called
     from nanobot.bus.events import InboundMessage

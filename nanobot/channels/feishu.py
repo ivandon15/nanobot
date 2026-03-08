@@ -1228,7 +1228,7 @@ class FeishuChannel(BaseChannel):
 
             # Fetch quoted/replied message content if this is a reply
             parent_id = getattr(message, "parent_id", None)
-            if parent_id and content:
+            if parent_id and (content or media_paths):
                 client = self._clients.get(account_id)
                 if client:
                     loop = asyncio.get_running_loop()
@@ -1298,5 +1298,4 @@ class FeishuChannel(BaseChannel):
         except Exception as e:
             logger.error("Error processing Feishu message: {}", e)
 
-    # Alias used in tests and external callers
-    _handle_message_event = _on_message
+
