@@ -276,3 +276,47 @@ async def test_reply_message_includes_quoted_content():
     published: InboundMessage = bus.publish_inbound.call_args[0][0]
     assert '[Replying to: "parent message text"]' in published.content
     assert "hello" in published.content
+
+
+@pytest.mark.asyncio
+async def test_group_reply_message_includes_quoted_content():
+    """Quote injection also works for group messages."""
+    from nanobot.channels.feishu import FeishuChannel
+    from nanobot.config.schema import FeishuConfig
+    from nanobot.bus.queue import MessageBus
+
+    cfg = FeishuConfig(enabled=True, app_id="aid", app_secret="asec", require_mention=False)
+    bus = MagicMock(spec=MessageBus)
+    bus.publish_inbound = AsyncMock()
+    ch = FeishuChannel(cfg, bus)
+
+    mock_client = MagicMock()
+    mock_get_resp = MagicMock()
+    mock_get_resp.success.return_value = True
+    mock_get_resp.data = MagicMock()
+    mock_get_resp.data.items = [MagicMock()]
+    mock_get_resp.data.items[0].msg_type = "text"
+    mock_get_resp.data.items[0].body = MagicMock()
+    mock_get_resp.data.items[0].body.content = '{"text": "original group msg"}'
+    mock_client.im.v1.message.get.return_value = mock_get_resp
+    ch._clients["default"] = mock_client
+
+    event_data = MagicMock()
+    event_data.event.message.message_id = "msg_group_child"
+    event_data.event.message.parent_id = "msg_group_parent"
+    event_data.event.message.root_id = None
+    event_data.event.message.chat_id = "oc_group1"
+    event_data.event.message.chat_type = "group"
+    event_data.event.message.message_type = "text"
+    event_data.event.message.content = '{"text": "reply text"}'
+    event_data.event.message.mentions = []
+    event_data.event.sender.sender_type = "user"
+    event_data.event.sender.sender_id = MagicMock()
+    event_data.event.sender.sender_id.open_id = "ou_user2"
+
+    await ch._handle_message_event(event_data, account_id="default")
+
+    assert bus.publish_inbound.called
+    from nanobot.bus.events import InboundMessage
+    published: InboundMessage = bus.publish_inbound.call_args[0][0]
+    assert '[Replying to: "original group msg"]' in published.content
