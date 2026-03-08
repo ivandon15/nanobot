@@ -332,11 +332,7 @@ def _should_use_card(text: str) -> bool:
     """Detect if text contains markdown that benefits from card rendering."""
     return bool(
         re.search(r"```[\s\S]*?```", text) or          # code blocks
-        re.search(r"\|.+\|[\r\n]+\|[-:| ]+\|", text) or  # tables
-        re.search(r"\*\*[^*]+\*\*", text) or           # bold
-        re.search(r"^#{1,6}\s+\S", text, re.MULTILINE) or  # headings
-        re.search(r"^[-*+]\s+\S", text, re.MULTILINE) or   # unordered lists
-        re.search(r"^\d+\.\s+\S", text, re.MULTILINE)      # ordered lists
+        re.search(r"\|.+\|[\r\n]+\|[-:| ]+\|", text)  # tables
     )
 
 
