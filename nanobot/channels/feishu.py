@@ -215,6 +215,24 @@ def _extract_post_content(content_json: dict) -> tuple[str, list[str]]:
                     texts.append(f"@{el.get('user_name', 'user')}")
                 elif tag == "img" and (key := el.get("image_key")):
                     images.append(key)
+                elif tag == "quote":
+                    # Recursively extract text from the nested quote block
+                    inner_content = el.get("content", [])
+                    inner_texts = []
+                    for inner_row in inner_content:
+                        if not isinstance(inner_row, list):
+                            continue
+                        for inner_el in inner_row:
+                            if not isinstance(inner_el, dict):
+                                continue
+                            inner_tag = inner_el.get("tag")
+                            if inner_tag in ("text", "a"):
+                                inner_texts.append(inner_el.get("text", ""))
+                            elif inner_tag == "at":
+                                inner_texts.append(f"@{inner_el.get('user_name', 'user')}")
+                    if inner_texts:
+                        quoted_text = " ".join(inner_texts).strip()
+                        texts.append(f"[Quoted: {quoted_text}]")
         return (" ".join(texts).strip() or None), images
 
     # Unwrap optional {"post": ...} envelope
@@ -313,8 +331,12 @@ class _FixedWsClient(lark.ws.Client if FEISHU_AVAILABLE else object):
 def _should_use_card(text: str) -> bool:
     """Detect if text contains markdown that benefits from card rendering."""
     return bool(
-        re.search(r"```[\s\S]*?```", text) or
-        re.search(r"\|.+\|[\r\n]+\|[-:| ]+\|", text)
+        re.search(r"```[\s\S]*?```", text) or          # code blocks
+        re.search(r"\|.+\|[\r\n]+\|[-:| ]+\|", text) or  # tables
+        re.search(r"\*\*[^*]+\*\*", text) or           # bold
+        re.search(r"^#{1,6}\s+\S", text, re.MULTILINE) or  # headings
+        re.search(r"^[-*+]\s+\S", text, re.MULTILINE) or   # unordered lists
+        re.search(r"^\d+\.\s+\S", text, re.MULTILINE)      # ordered lists
     )
 
 

@@ -38,3 +38,27 @@ def test_extract_post_content_keeps_direct_shape_behavior() -> None:
 
     assert text == "Daily report"
     assert image_keys == ["img_a", "img_b"]
+
+
+def test_extract_post_content_handles_quote_tag() -> None:
+    """Quote blocks inside a post should be extracted as [Quoted: ...]."""
+    payload = {
+        "title": "",
+        "content": [
+            [
+                {
+                    "tag": "quote",
+                    "content": [
+                        [{"tag": "text", "text": "original message"}]
+                    ],
+                }
+            ],
+            [{"tag": "text", "text": "my reply"}],
+        ],
+    }
+
+    text, image_keys = _extract_post_content(payload)
+
+    assert "[Quoted: original message]" in text
+    assert "my reply" in text
+    assert image_keys == []
