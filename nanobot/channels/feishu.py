@@ -560,6 +560,36 @@ class FeishuChannel(BaseChannel):
             logger.debug("Failed to fetch sender name for {}: {}", open_id, e)
         return None
 
+    def _fetch_message_content_sync(self, message_id: str, client) -> str | None:
+        """Fetch a message by ID and return its plain-text content. Best-effort."""
+        try:
+            from lark_oapi.api.im.v1 import GetMessageRequest
+            request = GetMessageRequest.builder().message_id(message_id).build()
+            response = client.im.v1.message.get(request)
+            if not response.success():
+                return None
+            items = getattr(response.data, "items", None) or []
+            if not items:
+                return None
+            item = items[0]
+            msg_type = getattr(item, "msg_type", "text") or "text"
+            body = getattr(item, "body", None)
+            raw = getattr(body, "content", "") or ""
+            try:
+                parsed = json.loads(raw)
+            except json.JSONDecodeError:
+                return raw.strip() or None
+            if msg_type == "text":
+                return parsed.get("text", "").strip() or None
+            if msg_type == "post":
+                text, _ = _extract_post_content(parsed)
+                return text.strip() or None
+            # For other types return a placeholder
+            return MSG_TYPE_MAP.get(msg_type, f"[{msg_type}]")
+        except Exception as e:
+            logger.debug("Failed to fetch message {}: {}", message_id, e)
+            return None
+
     async def _handle_group_message(
         self,
         sender_id: str,
@@ -1196,6 +1226,18 @@ class FeishuChannel(BaseChannel):
 
             content = "\n".join(content_parts) if content_parts else ""
 
+            # Fetch quoted/replied message content if this is a reply
+            parent_id = getattr(message, "parent_id", None)
+            if parent_id and content:
+                client = self._clients.get(account_id)
+                if client:
+                    loop = asyncio.get_running_loop()
+                    quoted = await loop.run_in_executor(
+                        None, self._fetch_message_content_sync, parent_id, client
+                    )
+                    if quoted:
+                        content = f'[Replying to: "{quoted}"]\n\n{content}'
+
             if not content and not media_paths:
                 return
 
@@ -1255,3 +1297,6 @@ class FeishuChannel(BaseChannel):
 
         except Exception as e:
             logger.error("Error processing Feishu message: {}", e)
+
+    # Alias used in tests and external callers
+    _handle_message_event = _on_message

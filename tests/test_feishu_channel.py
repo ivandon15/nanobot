@@ -229,3 +229,50 @@ async def test_group_message_from_bot_uses_account_name():
         sender_type="bot",
     )
     assert captured[0].content.startswith("[VicePresident]:")
+
+
+@pytest.mark.asyncio
+async def test_reply_message_includes_quoted_content():
+    """When parent_id is set, fetched parent content is prepended to message."""
+    from nanobot.channels.feishu import FeishuChannel
+    from nanobot.config.schema import FeishuConfig
+    from nanobot.bus.queue import MessageBus
+    from nanobot.bus.events import InboundMessage
+
+    cfg = FeishuConfig(enabled=True, app_id="aid", app_secret="asec", allow_from=["*"])
+    bus = MagicMock(spec=MessageBus)
+    bus.publish_inbound = AsyncMock()
+    ch = FeishuChannel(cfg, bus)
+
+    # Mock lark client with im.v1.message.get returning parent content
+    mock_client = MagicMock()
+    mock_get_resp = MagicMock()
+    mock_get_resp.success.return_value = True
+    mock_get_resp.data = MagicMock()
+    mock_get_resp.data.items = [MagicMock()]
+    mock_get_resp.data.items[0].msg_type = "text"
+    mock_get_resp.data.items[0].body = MagicMock()
+    mock_get_resp.data.items[0].body.content = '{"text": "parent message text"}'
+    mock_client.im.v1.message.get.return_value = mock_get_resp
+    ch._clients["default"] = mock_client
+
+    # Build a minimal P2ImMessageReceiveV1-like event with parent_id
+    event_data = MagicMock()
+    event_data.event.message.message_id = "msg_child"
+    event_data.event.message.parent_id = "msg_parent"
+    event_data.event.message.root_id = None
+    event_data.event.message.chat_id = "ou_user1"
+    event_data.event.message.chat_type = "p2p"
+    event_data.event.message.message_type = "text"
+    event_data.event.message.content = '{"text": "hello"}'
+    event_data.event.message.mentions = []
+    event_data.event.sender.sender_type = "user"
+    event_data.event.sender.sender_id = MagicMock()
+    event_data.event.sender.sender_id.open_id = "ou_user1"
+
+    await ch._handle_message_event(event_data, account_id="default")
+
+    assert bus.publish_inbound.called
+    published: InboundMessage = bus.publish_inbound.call_args[0][0]
+    assert '[Replying to: "parent message text"]' in published.content
+    assert "hello" in published.content
