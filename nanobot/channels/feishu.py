@@ -35,6 +35,7 @@ try:
         CreateMessageRequestBody,
         DeleteMessageReactionRequest,
         Emoji,
+        GetMessageRequest,
         GetMessageResourceRequest,
         P2ImMessageReceiveV1,
     )
@@ -563,7 +564,6 @@ class FeishuChannel(BaseChannel):
     def _fetch_message_content_sync(self, message_id: str, client) -> str | None:
         """Fetch a message by ID and return its plain-text content. Best-effort."""
         try:
-            from lark_oapi.api.im.v1 import GetMessageRequest
             request = GetMessageRequest.builder().message_id(message_id).build()
             response = client.im.v1.message.get(request)
             if not response.success():
