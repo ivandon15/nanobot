@@ -147,6 +147,7 @@ class AgentPool:
             mcp_servers=self.config.tools.mcp_servers,
             channels_config=self.config.channels,
             openviking_config=self.config.tools.openviking,
+            chrome_config=self.config.tools.chrome,
             agent_id=agent_id,
             agent_pool=self,
         )

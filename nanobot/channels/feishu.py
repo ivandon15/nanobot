@@ -303,7 +303,8 @@ class _FixedWsClient(lark.ws.Client if FEISHU_AVAILABLE else object):
             self._service_id = service_id
 
             _lark_logger.info(self._fmt_log("connected to {}", conn_url))
-            _loop.create_task(self._receive_message_loop())
+            t = _loop.create_task(self._receive_message_loop())
+            t.add_done_callback(lambda _: None)  # suppress "Task exception was never retrieved"
         except _ws.InvalidStatusCode as e:
             _lark_ws_mod._parse_ws_conn_exception(e)
         finally:

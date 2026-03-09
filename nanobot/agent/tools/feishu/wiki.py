@@ -10,8 +10,9 @@ from nanobot.config.schema import FeishuConfig
 class FeishuWikiTool(Tool):
     """Browse Feishu wiki spaces and nodes."""
 
-    def __init__(self, cfg: FeishuConfig):
+    def __init__(self, cfg: FeishuConfig, account_id: str | None = None):
         self._cfg = cfg
+        self._account_id = account_id
 
     @property
     def name(self) -> str:
@@ -59,10 +60,14 @@ class FeishuWikiTool(Tool):
         return await loop.run_in_executor(None, self._run, action, space_id, node_token, parent_node_token)
 
     def _run(self, action: str, space_id: str, node_token: str, parent_node_token: str) -> str:
-        client = get_feishu_client(self._cfg)
+        from lark_oapi.api.wiki.v2.model import (
+            ListSpaceRequest, ListSpaceNodeRequest, GetNodeSpaceRequest,
+        )
+        client = get_feishu_client(self._cfg, self._account_id)
         try:
             if action == "list_spaces":
-                resp = client.wiki.v2.space.list()
+                req = ListSpaceRequest.builder().build()
+                resp = client.wiki.v2.space.list(req)
                 if not resp.success():
                     return f"Error: {resp.code} {resp.msg}"
                 spaces = [
@@ -74,10 +79,10 @@ class FeishuWikiTool(Tool):
             elif action == "list_nodes":
                 if not space_id:
                     return "Error: space_id required for list_nodes"
-                kwargs: dict[str, Any] = {"space_id": space_id}
+                builder = ListSpaceNodeRequest.builder().space_id(space_id)
                 if parent_node_token:
-                    kwargs["parent_node_token"] = parent_node_token
-                resp = client.wiki.v2.space_node.list(**kwargs)
+                    builder = builder.parent_node_token(parent_node_token)
+                resp = client.wiki.v2.space_node.list(builder.build())
                 if not resp.success():
                     return f"Error: {resp.code} {resp.msg}"
                 nodes = [
@@ -89,7 +94,8 @@ class FeishuWikiTool(Tool):
             elif action == "get_node":
                 if not node_token:
                     return "Error: node_token required for get_node"
-                resp = client.wiki.v2.space.get_node(token=node_token)
+                req = GetNodeSpaceRequest.builder().token(node_token).build()
+                resp = client.wiki.v2.space.get_node(req)
                 if not resp.success():
                     return f"Error: {resp.code} {resp.msg}"
                 node = resp.data.node

@@ -333,6 +333,14 @@ class ExecToolConfig(Base):
     path_append: str = ""
 
 
+class ChromeConfig(Base):
+    """Chrome browser CDP tool configuration."""
+
+    enabled: bool = False
+    cdp_host: str = "127.0.0.1"
+    cdp_port: int = 9222
+
+
 class MCPServerConfig(Base):
     """MCP server connection configuration (stdio or HTTP)."""
 
@@ -366,6 +374,7 @@ class ToolsConfig(Base):
 
     web: WebToolsConfig = Field(default_factory=WebToolsConfig)
     exec: ExecToolConfig = Field(default_factory=ExecToolConfig)
+    chrome: ChromeConfig = Field(default_factory=ChromeConfig)
     restrict_to_workspace: bool = False  # If true, restrict all tool access to workspace directory
     mcp_servers: dict[str, MCPServerConfig] = Field(default_factory=dict)
     openviking: OpenVikingConfig = Field(default_factory=OpenVikingConfig)

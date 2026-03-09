@@ -8,15 +8,15 @@ from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.config.schema import FeishuConfig
 
 
-def register_feishu_tools(registry: ToolRegistry, cfg: FeishuConfig) -> None:
+def register_feishu_tools(registry: ToolRegistry, cfg: FeishuConfig, account_id: str | None = None) -> None:
     """Register enabled Feishu tools into the tool registry."""
     if cfg.tools.doc:
-        registry.register(FeishuDocTool(cfg))
+        registry.register(FeishuDocTool(cfg, account_id))
     if cfg.tools.wiki:
-        registry.register(FeishuWikiTool(cfg))
+        registry.register(FeishuWikiTool(cfg, account_id))
     if cfg.tools.bitable:
-        registry.register(FeishuBitableTool(cfg))
+        registry.register(FeishuBitableTool(cfg, account_id))
     if cfg.tools.drive:
-        registry.register(FeishuDriveTool(cfg))
+        registry.register(FeishuDriveTool(cfg, account_id))
     if cfg.tools.task:
-        registry.register(FeishuTaskTool(cfg))
+        registry.register(FeishuTaskTool(cfg, account_id))

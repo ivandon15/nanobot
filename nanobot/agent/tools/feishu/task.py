@@ -1,5 +1,6 @@
 """Feishu task tool (feishu_task)."""
 import json
+import time
 from typing import Any
 
 from nanobot.agent.tools.base import Tool
@@ -10,8 +11,9 @@ from nanobot.config.schema import FeishuConfig
 class FeishuTaskTool(Tool):
     """Manage Feishu tasks."""
 
-    def __init__(self, cfg: FeishuConfig):
+    def __init__(self, cfg: FeishuConfig, account_id: str | None = None):
         self._cfg = cfg
+        self._account_id = account_id
 
     @property
     def name(self) -> str:
@@ -63,13 +65,17 @@ class FeishuTaskTool(Tool):
         )
 
     def _run(self, action: str, task_guid: str, summary: str, due: str, tasklist_guid: str) -> str:
-        client = get_feishu_client(self._cfg)
+        from lark_oapi.api.task.v2.model import (
+            ListTaskRequest, CreateTaskRequest, PatchTaskRequest, DeleteTaskRequest,
+        )
+        from lark_oapi.api.task.v2.model.input_task import InputTask
+        from lark_oapi.api.task.v2.model.due import Due
+        from lark_oapi.api.task.v2.model.patch_task_request_body import PatchTaskRequestBody
+        client = get_feishu_client(self._cfg, self._account_id)
         try:
             if action == "list_tasks":
-                kwargs: dict[str, Any] = {}
-                if tasklist_guid:
-                    kwargs["tasklist_guid"] = tasklist_guid
-                resp = client.task.v2.task.list(**kwargs)
+                req = ListTaskRequest.builder().build()
+                resp = client.task.v2.task.list(req)
                 if not resp.success():
                     return f"Error: {resp.code} {resp.msg}"
                 tasks = [
@@ -85,10 +91,11 @@ class FeishuTaskTool(Tool):
             elif action == "create_task":
                 if not summary:
                     return "Error: summary required for create_task"
-                body: dict[str, Any] = {"summary": summary}
+                task_builder = InputTask.builder().summary(summary)
                 if due:
-                    body["due"] = {"timestamp": due}
-                resp = client.task.v2.task.create(request_body=body)
+                    task_builder = task_builder.due(Due.builder().timestamp(due).build())
+                req = CreateTaskRequest.builder().request_body(task_builder.build()).build()
+                resp = client.task.v2.task.create(req)
                 if not resp.success():
                     return f"Error: {resp.code} {resp.msg}"
                 return json.dumps({"guid": resp.data.task.guid, "summary": resp.data.task.summary})
@@ -96,12 +103,11 @@ class FeishuTaskTool(Tool):
             elif action == "complete_task":
                 if not task_guid:
                     return "Error: task_guid required for complete_task"
-                import time
-                resp = client.task.v2.task.patch(
-                    task_guid=task_guid,
-                    request_body={"task": {"completed_at": str(int(time.time() * 1000))},
-                                  "update_fields": ["completed_at"]},
-                )
+                completed_at = str(int(time.time() * 1000))
+                task_body = InputTask.builder().completed_at(completed_at).build()
+                body = PatchTaskRequestBody.builder().task(task_body).update_fields(["completed_at"]).build()
+                req = PatchTaskRequest.builder().task_guid(task_guid).request_body(body).build()
+                resp = client.task.v2.task.patch(req)
                 if not resp.success():
                     return f"Error: {resp.code} {resp.msg}"
                 return json.dumps({"guid": task_guid, "completed": True})
@@ -109,7 +115,8 @@ class FeishuTaskTool(Tool):
             elif action == "delete_task":
                 if not task_guid:
                     return "Error: task_guid required for delete_task"
-                resp = client.task.v2.task.delete(task_guid=task_guid)
+                req = DeleteTaskRequest.builder().task_guid(task_guid).build()
+                resp = client.task.v2.task.delete(req)
                 if not resp.success():
                     return f"Error: {resp.code} {resp.msg}"
                 return json.dumps({"deleted": True, "guid": task_guid})

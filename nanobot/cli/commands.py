@@ -524,6 +524,17 @@ def gateway(
             cron.stop()
             await channels.stop_all()
 
+    # Start restart watcher as an independent background process.
+    # The watcher monitors /tmp/nanobot_restart and restarts the gateway when triggered.
+    import subprocess as _sp
+    _watcher = _sp.Popen(
+        [sys.executable, "-m", "nanobot.cli.restart_watcher", str(os.getpid())] + sys.argv,
+        start_new_session=True,
+        stdout=_sp.DEVNULL,
+        stderr=_sp.DEVNULL,
+    )
+    console.print(f"[green]✓[/green] Restart watcher started (PID {_watcher.pid})")
+
     asyncio.run(run())
 
 

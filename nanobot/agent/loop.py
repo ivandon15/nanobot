@@ -29,7 +29,7 @@ from nanobot.providers.base import LLMProvider
 from nanobot.session.manager import Session, SessionManager
 
 if TYPE_CHECKING:
-    from nanobot.config.schema import ChannelsConfig, ExecToolConfig, OpenVikingConfig
+    from nanobot.config.schema import ChannelsConfig, ChromeConfig, ExecToolConfig, OpenVikingConfig
     from nanobot.cron.service import CronService
 
 
@@ -68,6 +68,7 @@ class AgentLoop:
         mcp_servers: dict | None = None,
         channels_config: ChannelsConfig | None = None,
         openviking_config: OpenVikingConfig | None = None,
+        chrome_config: ChromeConfig | None = None,
         agent_id: str | None = None,
         agent_pool: Any | None = None,
     ):
@@ -89,6 +90,7 @@ class AgentLoop:
         self.cron_service = cron_service
         self.restrict_to_workspace = restrict_to_workspace
         self.openviking_config = openviking_config
+        self.chrome_config = chrome_config
         self._agent_id = agent_id
         self._agent_pool = agent_pool
 
@@ -124,6 +126,7 @@ class AgentLoop:
         self._consolidation_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
         self._session_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
         self._active_tasks: dict[str, list[asyncio.Task]] = {}  # session_key -> tasks
+        self._cancel_events: dict[str, asyncio.Event] = {}  # session_key -> cancel event
         self._current_context: tuple[str, str, dict] | None = None  # (channel, chat_id, metadata)
         self._inbound: asyncio.Queue[InboundMessage] = asyncio.Queue()  # Per-agent inbound queue
         self._register_default_tools()
@@ -182,7 +185,10 @@ class AgentLoop:
                 self.tools.register(cls(data_path=self.openviking_config.resolved_data_path(self.workspace)))
         if self.channels_config and self.channels_config.feishu.enabled:
             from nanobot.agent.tools.feishu import register_feishu_tools
-            register_feishu_tools(self.tools, self.channels_config.feishu)
+            register_feishu_tools(self.tools, self.channels_config.feishu, account_id=self._agent_id)
+        if self.chrome_config and self.chrome_config.enabled:
+            from nanobot.agent.tools.chrome import ChromeTool
+            self.tools.register(ChromeTool(host=self.chrome_config.cdp_host, port=self.chrome_config.cdp_port))
 
     async def _connect_mcp(self) -> None:
         """Connect to configured MCP servers (one-time, lazy)."""
@@ -243,6 +249,7 @@ class AgentLoop:
         self,
         initial_messages: list[dict],
         on_progress: Callable[..., Awaitable[None]] | None = None,
+        cancel_event: asyncio.Event | None = None,
     ) -> tuple[str | None, list[str], list[dict]]:
         """Run the agent iteration loop. Returns (final_content, tools_used, messages)."""
         messages = initial_messages
@@ -252,6 +259,9 @@ class AgentLoop:
 
         while iteration < self.max_iterations:
             iteration += 1
+
+            if cancel_event and cancel_event.is_set():
+                return "⏹ Task cancelled.", tools_used, messages
 
             # Use image_provider when the current turn has images
             has_images = any(
@@ -297,6 +307,8 @@ class AgentLoop:
                 )
 
                 for tool_call in response.tool_calls:
+                    if cancel_event and cancel_event.is_set():
+                        return "⏹ Task cancelled.", tools_used, messages
                     tools_used.append(tool_call.name)
                     args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
                     logger.info("Tool call: {}({})", tool_call.name, args_str[:200])
@@ -353,6 +365,9 @@ class AgentLoop:
 
     async def _handle_stop(self, msg: InboundMessage) -> None:
         """Cancel all active tasks and subagents for the session."""
+        event = self._cancel_events.get(msg.session_key)
+        if event:
+            event.set()
         tasks = self._active_tasks.pop(msg.session_key, [])
         cancelled = sum(1 for t in tasks if not t.done() and t.cancel())
         for t in tasks:
@@ -424,7 +439,12 @@ class AgentLoop:
                 history=history,
                 current_message=msg.content, channel=channel, chat_id=chat_id,
             )
-            final_content, _, all_msgs = await self._run_agent_loop(messages)
+            cancel_event = asyncio.Event()
+            self._cancel_events[key] = cancel_event
+            try:
+                final_content, _, all_msgs = await self._run_agent_loop(messages, cancel_event=cancel_event)
+            finally:
+                self._cancel_events.pop(key, None)
             self._save_turn(session, all_msgs, 1 + len(history))
             self.sessions.save(session)
             return OutboundMessage(channel=channel, chat_id=chat_id,
@@ -525,9 +545,14 @@ class AgentLoop:
                 channel=msg.channel, chat_id=msg.chat_id, content=content, metadata=meta,
             ))
 
-        final_content, _, all_msgs = await self._run_agent_loop(
-            initial_messages, on_progress=on_progress or _bus_progress,
-        )
+        cancel_event = asyncio.Event()
+        self._cancel_events[key] = cancel_event
+        try:
+            final_content, _, all_msgs = await self._run_agent_loop(
+                initial_messages, on_progress=on_progress or _bus_progress, cancel_event=cancel_event,
+            )
+        finally:
+            self._cancel_events.pop(key, None)
 
         if final_content is None:
             final_content = "I've completed processing but have no response to give."

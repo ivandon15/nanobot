@@ -10,8 +10,9 @@ from nanobot.config.schema import FeishuConfig
 class FeishuDriveTool(Tool):
     """Browse and manage Feishu cloud drive files."""
 
-    def __init__(self, cfg: FeishuConfig):
+    def __init__(self, cfg: FeishuConfig, account_id: str | None = None):
         self._cfg = cfg
+        self._account_id = account_id
 
     @property
     def name(self) -> str:
@@ -55,13 +56,16 @@ class FeishuDriveTool(Tool):
         return await loop.run_in_executor(None, self._run, action, folder_token, name)
 
     def _run(self, action: str, folder_token: str, name: str) -> str:
-        client = get_feishu_client(self._cfg)
+        from lark_oapi.api.drive.v1.model import (
+            ListFileRequest, CreateFolderFileRequest, CreateFolderFileRequestBody,
+        )
+        client = get_feishu_client(self._cfg, self._account_id)
         try:
             if action == "list_files":
-                kwargs: dict[str, Any] = {}
+                builder = ListFileRequest.builder()
                 if folder_token:
-                    kwargs["folder_token"] = folder_token
-                resp = client.drive.v1.file.list(**kwargs)
+                    builder = builder.folder_token(folder_token)
+                resp = client.drive.v1.file.list(builder.build())
                 if not resp.success():
                     return f"Error: {resp.code} {resp.msg}"
                 files = [
@@ -73,10 +77,11 @@ class FeishuDriveTool(Tool):
             elif action == "create_folder":
                 if not name:
                     return "Error: name required for create_folder"
-                kwargs = {"name": name}
+                body_builder = CreateFolderFileRequestBody.builder().name(name)
                 if folder_token:
-                    kwargs["folder_token"] = folder_token
-                resp = client.drive.v1.file.create_folder(**kwargs)
+                    body_builder = body_builder.folder_token(folder_token)
+                req = CreateFolderFileRequest.builder().request_body(body_builder.build()).build()
+                resp = client.drive.v1.file.create_folder(req)
                 if not resp.success():
                     return f"Error: {resp.code} {resp.msg}"
                 return json.dumps({

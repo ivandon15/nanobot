@@ -10,8 +10,9 @@ from nanobot.config.schema import FeishuConfig
 class FeishuBitableTool(Tool):
     """CRUD operations on Feishu multi-dimensional tables (bitable)."""
 
-    def __init__(self, cfg: FeishuConfig):
+    def __init__(self, cfg: FeishuConfig, account_id: str | None = None):
         self._cfg = cfg
+        self._account_id = account_id
 
     @property
     def name(self) -> str:
@@ -72,10 +73,20 @@ class FeishuBitableTool(Tool):
 
     def _run(self, action: str, app_token: str, table_id: str,
              record_id: str, fields: dict, filter_expr: str) -> str:
-        client = get_feishu_client(self._cfg)
+        from lark_oapi.api.bitable.v1.model import (
+            ListAppTableRequest,
+            ListAppTableFieldRequest,
+            ListAppTableRecordRequest,
+            CreateAppTableRecordRequest,
+            UpdateAppTableRecordRequest,
+            DeleteAppTableRecordRequest,
+        )
+        from lark_oapi.api.bitable.v1.model.app_table_record import AppTableRecord
+        client = get_feishu_client(self._cfg, self._account_id)
         try:
             if action == "list_tables":
-                resp = client.bitable.v1.app_table.list(app_token=app_token)
+                req = ListAppTableRequest.builder().app_token(app_token).build()
+                resp = client.bitable.v1.app_table.list(req)
                 if not resp.success():
                     return f"Error: {resp.code} {resp.msg}"
                 tables = [
@@ -87,9 +98,13 @@ class FeishuBitableTool(Tool):
             elif action == "list_fields":
                 if not table_id:
                     return "Error: table_id required for list_fields"
-                resp = client.bitable.v1.app_table_field.list(
-                    app_token=app_token, table_id=table_id
+                req = (
+                    ListAppTableFieldRequest.builder()
+                    .app_token(app_token)
+                    .table_id(table_id)
+                    .build()
                 )
+                resp = client.bitable.v1.app_table_field.list(req)
                 if not resp.success():
                     return f"Error: {resp.code} {resp.msg}"
                 fields_list = [
@@ -101,10 +116,10 @@ class FeishuBitableTool(Tool):
             elif action == "list_records":
                 if not table_id:
                     return "Error: table_id required for list_records"
-                kwargs: dict[str, Any] = {"app_token": app_token, "table_id": table_id}
+                builder = ListAppTableRecordRequest.builder().app_token(app_token).table_id(table_id)
                 if filter_expr:
-                    kwargs["filter"] = filter_expr
-                resp = client.bitable.v1.app_table_record.list(**kwargs)
+                    builder = builder.filter(filter_expr)
+                resp = client.bitable.v1.app_table_record.list(builder.build())
                 if not resp.success():
                     return f"Error: {resp.code} {resp.msg}"
                 records = [
@@ -116,10 +131,15 @@ class FeishuBitableTool(Tool):
             elif action == "create_record":
                 if not table_id:
                     return "Error: table_id required for create_record"
-                resp = client.bitable.v1.app_table_record.create(
-                    app_token=app_token, table_id=table_id,
-                    request_body={"fields": fields},
+                body = AppTableRecord.builder().fields(fields).build()
+                req = (
+                    CreateAppTableRecordRequest.builder()
+                    .app_token(app_token)
+                    .table_id(table_id)
+                    .request_body(body)
+                    .build()
                 )
+                resp = client.bitable.v1.app_table_record.create(req)
                 if not resp.success():
                     return f"Error: {resp.code} {resp.msg}"
                 return json.dumps({"record_id": resp.data.record.record_id}, ensure_ascii=False)
@@ -127,10 +147,16 @@ class FeishuBitableTool(Tool):
             elif action == "update_record":
                 if not table_id or not record_id:
                     return "Error: table_id and record_id required for update_record"
-                resp = client.bitable.v1.app_table_record.update(
-                    app_token=app_token, table_id=table_id, record_id=record_id,
-                    request_body={"fields": fields},
+                body = AppTableRecord.builder().fields(fields).build()
+                req = (
+                    UpdateAppTableRecordRequest.builder()
+                    .app_token(app_token)
+                    .table_id(table_id)
+                    .record_id(record_id)
+                    .request_body(body)
+                    .build()
                 )
+                resp = client.bitable.v1.app_table_record.update(req)
                 if not resp.success():
                     return f"Error: {resp.code} {resp.msg}"
                 return json.dumps({"record_id": resp.data.record.record_id}, ensure_ascii=False)
@@ -138,9 +164,14 @@ class FeishuBitableTool(Tool):
             elif action == "delete_record":
                 if not table_id or not record_id:
                     return "Error: table_id and record_id required for delete_record"
-                resp = client.bitable.v1.app_table_record.delete(
-                    app_token=app_token, table_id=table_id, record_id=record_id,
+                req = (
+                    DeleteAppTableRecordRequest.builder()
+                    .app_token(app_token)
+                    .table_id(table_id)
+                    .record_id(record_id)
+                    .build()
                 )
+                resp = client.bitable.v1.app_table_record.delete(req)
                 if not resp.success():
                     return f"Error: {resp.code} {resp.msg}"
                 return json.dumps({"deleted": True, "record_id": record_id})

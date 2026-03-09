@@ -20,6 +20,7 @@
 
 ## 📢 News
 
+- **2026-03-10** ⏹ `/stop` now interrupts the agent loop immediately — cancels between tool calls instead of waiting for the full task to finish.
 - **2026-02-28** 🚀 Released **v0.1.4.post3** — cleaner context, hardened session history, and smarter agent. Please see [release notes](https://github.com/HKUDS/nanobot/releases/tag/v0.1.4.post3) for details.
 - **2026-02-27** 🧠 Experimental thinking mode support, DingTalk media messages, Feishu and QQ channel fixes.
 - **2026-02-26** 🛡️ Session poisoning fix, WhatsApp dedup, Windows path guard, Mistral compatibility.
@@ -1019,6 +1020,31 @@ If you edit the `.service` file itself, run `systemctl --user daemon-reload` bef
 > ```bash
 > loginctl enable-linger $USER
 > ```
+
+## 🔄 Remote Restart via Agent
+
+nanobot automatically starts a **restart watcher** alongside the gateway. The watcher monitors `/tmp/nanobot_restart` and restarts the gateway when that file appears — without requiring shell access.
+
+This enables a useful pattern: when a task fails due to a code bug, the agent can invoke Claude Code to fix it and then trigger a gateway restart, all from within the chat.
+
+**How it works:**
+
+1. Agent detects a failure and asks the user if they want Claude Code to fix it.
+2. User confirms; agent runs `claude -p "Fix: <description>"` via the `exec` tool.
+3. Agent reports the fix output, then asks if the user wants to restart.
+4. User confirms; agent writes the signal file:
+   ```bash
+   echo "fix applied" > /tmp/nanobot_restart
+   ```
+5. The watcher restarts the gateway automatically.
+
+You can also trigger a restart manually from any terminal:
+
+```bash
+echo "manual restart" > /tmp/nanobot_restart
+```
+
+
 
 ## 🧠 OpenViking — Persistent Memory
 
