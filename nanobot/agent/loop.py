@@ -71,6 +71,9 @@ class AgentLoop:
         chrome_config: ChromeConfig | None = None,
         agent_id: str | None = None,
         agent_pool: Any | None = None,
+        image_gen_model: str | None = None,
+        image_gen_api_key: str | None = None,
+        image_gen_api_base: str | None = None,
     ):
         from nanobot.config.schema import ExecToolConfig
         self.bus = bus
@@ -84,6 +87,9 @@ class AgentLoop:
         self.memory_window = memory_window
         self.reasoning_effort = reasoning_effort
         self.image_provider = image_provider
+        self.image_gen_model = image_gen_model
+        self.image_gen_api_key = image_gen_api_key
+        self.image_gen_api_base = image_gen_api_base
         self.brave_api_key = brave_api_key
         self.web_proxy = web_proxy
         self.exec_config = exec_config or ExecToolConfig()
@@ -189,6 +195,14 @@ class AgentLoop:
         if self.chrome_config and self.chrome_config.enabled:
             from nanobot.agent.tools.chrome import ChromeTool
             self.tools.register(ChromeTool(host=self.chrome_config.cdp_host, port=self.chrome_config.cdp_port))
+        if self.image_gen_model and self.image_gen_api_key:
+            from nanobot.agent.tools.image import GenerateImageTool
+            self.tools.register(GenerateImageTool(
+                model=self.image_gen_model,
+                api_key=self.image_gen_api_key,
+                api_base=self.image_gen_api_base or "https://openrouter.ai/api",
+                workspace=self.workspace,
+            ))
 
     async def _connect_mcp(self) -> None:
         """Connect to configured MCP servers (one-time, lazy)."""
@@ -356,12 +370,21 @@ class AgentLoop:
             except asyncio.TimeoutError:
                 continue
 
-            if msg.content.strip().lower() == "/stop":
+            if self._is_stop_command(msg.content):
                 await self._handle_stop(msg)
             else:
                 task = asyncio.create_task(self._dispatch(msg))
                 self._active_tasks.setdefault(msg.session_key, []).append(task)
                 task.add_done_callback(lambda t, k=msg.session_key: self._active_tasks.get(k, []) and self._active_tasks[k].remove(t) if t in self._active_tasks.get(k, []) else None)
+
+    @staticmethod
+    def _is_stop_command(content: str) -> bool:
+        """Check if content is a /stop command, handling group [Name]: prefix."""
+        stripped = content.strip()
+        # Strip [Name]: prefix injected for group messages
+        if stripped.startswith("[") and "]: " in stripped:
+            stripped = stripped.split("]: ", 1)[1].strip()
+        return stripped.lower() == "/stop"
 
     async def _handle_stop(self, msg: InboundMessage) -> None:
         """Cancel all active tasks and subagents for the session."""

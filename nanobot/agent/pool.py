@@ -49,6 +49,15 @@ class AgentPool:
             provider = self._build_provider_chain(model, fb_models)
             image_provider = self._build_provider_chain(img_model, img_fb) if img_model else None
 
+            gen_model = defaults.image_gen_model
+            gen_api_key = None
+            gen_api_base = None
+            if gen_model:
+                or_cfg = getattr(self.config.providers, "openrouter", None)
+                if or_cfg:
+                    gen_api_key = or_cfg.api_key or None
+                    gen_api_base = or_cfg.api_base or "https://openrouter.ai/api"
+
             agent = self._create_agent(
                 agent_id="default",
                 model=provider.get_default_model(),
@@ -60,6 +69,9 @@ class AgentPool:
                 memory_window=defaults.memory_window,
                 reasoning_effort=defaults.reasoning_effort,
                 image_provider=image_provider,
+                image_gen_model=gen_model,
+                image_gen_api_key=gen_api_key,
+                image_gen_api_base=gen_api_base,
             )
             self._agents["default"] = agent
             logger.info("Created default agent")
@@ -79,6 +91,15 @@ class AgentPool:
                 # Use the provider's resolved model name (may differ, e.g. "anthropic/kimi-for-coding")
                 resolved_model = provider.get_default_model()
 
+                gen_model = agent_config.image_gen_model if agent_config.image_gen_model is not None else defaults.image_gen_model
+                gen_api_key = None
+                gen_api_base = None
+                if gen_model:
+                    or_cfg = getattr(self.config.providers, "openrouter", None)
+                    if or_cfg:
+                        gen_api_key = or_cfg.api_key or None
+                        gen_api_base = or_cfg.api_base or "https://openrouter.ai/api"
+
                 workspace_str = agent_config.workspace or defaults.workspace
                 base = Path(workspace_str).expanduser()
                 workspace = base.parent / f"{base.name}-{agent_config.id}"
@@ -94,6 +115,9 @@ class AgentPool:
                     memory_window=agent_config.memory_window or defaults.memory_window,
                     reasoning_effort=agent_config.reasoning_effort or defaults.reasoning_effort,
                     image_provider=image_provider,
+                    image_gen_model=gen_model,
+                    image_gen_api_key=gen_api_key,
+                    image_gen_api_base=gen_api_base,
                 )
                 self._agents[agent_config.id] = agent
                 logger.info("Created agent: {}", agent_config.id)
@@ -123,6 +147,9 @@ class AgentPool:
         memory_window: int,
         reasoning_effort: str | None,
         image_provider: "FallbackProvider | None" = None,
+        image_gen_model: str | None = None,
+        image_gen_api_key: str | None = None,
+        image_gen_api_base: str | None = None,
     ) -> AgentLoop:
         """Create a single AgentLoop instance."""
         workspace.mkdir(parents=True, exist_ok=True)
@@ -139,6 +166,9 @@ class AgentPool:
             memory_window=memory_window,
             reasoning_effort=reasoning_effort,
             image_provider=image_provider,
+            image_gen_model=image_gen_model,
+            image_gen_api_key=image_gen_api_key,
+            image_gen_api_base=image_gen_api_base,
             brave_api_key=self.config.tools.web.search.api_key,
             web_proxy=self.config.tools.web.proxy,
             exec_config=self.config.tools.exec,
