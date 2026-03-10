@@ -239,6 +239,7 @@ class AgentDefaults(Base):
     model_fallbacks: list[str] = Field(default_factory=list)
     image_model: str | None = None
     image_model_fallbacks: list[str] = Field(default_factory=list)
+    image_gen_model: str | None = None
 
 
 class AgentConfig(Base):
@@ -257,6 +258,7 @@ class AgentConfig(Base):
     model_fallbacks: list[str] | None = None
     image_model: str | None = None
     image_model_fallbacks: list[str] | None = None
+    image_gen_model: str | None = None
 
 
 class AgentsConfig(Base):
@@ -415,6 +417,14 @@ class Config(BaseSettings):
 
         forced = self.agents.defaults.provider
         if forced != "auto":
+            # If model has an explicit provider prefix (e.g. "anthropic/claude-..."),
+            # let it override the forced provider so image_model can use a different endpoint.
+            model_prefix = (model or "").lower().split("/", 1)[0] if "/" in (model or "") else ""
+            if model_prefix and model_prefix != forced:
+                for spec in PROVIDERS:
+                    p = getattr(self.providers, spec.name, None)
+                    if p and model_prefix == spec.name and (spec.is_oauth or p.api_key):
+                        return p, spec.name
             p = getattr(self.providers, forced, None)
             return (p, forced) if p else (None, None)
 
