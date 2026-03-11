@@ -524,8 +524,19 @@ def gateway(
             cron.stop()
             await channels.stop_all()
 
+    # Kill any previous restart_watcher before spawning a new one.
+    # Without this, each manual restart accumulates a new watcher process.
+    _watcher_pid_file = "/tmp/nanobot_watcher.pid"
+    try:
+        _prev_pid = int(open(_watcher_pid_file).read().strip())
+        import signal as _signal
+        os.kill(_prev_pid, _signal.SIGTERM)
+    except (OSError, ValueError, ProcessLookupError):
+        pass
+
     # Start restart watcher as an independent background process.
     # The watcher monitors /tmp/nanobot_restart and restarts the gateway when triggered.
+    # It also auto-restarts the gateway if it crashes.
     import subprocess as _sp
     _watcher = _sp.Popen(
         [sys.executable, "-m", "nanobot.cli.restart_watcher", str(os.getpid())] + sys.argv,

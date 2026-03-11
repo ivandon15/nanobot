@@ -1,12 +1,16 @@
 """Restart watcher for nanobot gateway.
 
-Runs as an independent background process. Polls for a signal file and
-restarts the gateway when it appears. Started automatically by `nanobot gateway`.
+Runs as an independent background process. Monitors the gateway process and
+restarts it if it dies. Also responds to a signal file for manual restarts.
+Started automatically by `nanobot gateway`.
 
 Signal file: /tmp/nanobot_restart
   - Create this file to trigger a restart.
   - Optional: write a message into the file (shown in logs).
   - The watcher deletes the file, kills the old gateway, and starts a new one.
+
+PID file: /tmp/nanobot_watcher.pid
+  - Written on startup so a new gateway can kill the previous watcher.
 """
 import os
 import signal
@@ -15,7 +19,16 @@ import sys
 import time
 
 SIGNAL_FILE = "/tmp/nanobot_restart"
+WATCHER_PID_FILE = "/tmp/nanobot_watcher.pid"
 CHECK_INTERVAL = 2  # seconds
+
+
+def _is_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
 
 
 def main() -> None:
@@ -26,57 +39,61 @@ def main() -> None:
     gateway_pid = int(sys.argv[1])
     gateway_cmd = sys.argv[2:]
 
+    # Write own PID so the next gateway launch can kill us before spawning a replacement.
+    try:
+        with open(WATCHER_PID_FILE, "w") as f:
+            f.write(str(os.getpid()))
+    except OSError:
+        pass
+
     while True:
         time.sleep(CHECK_INTERVAL)
 
-        # Exit if the gateway process died on its own (not via signal file).
-        # This prevents watcher processes from accumulating across manual restarts.
-        try:
-            os.kill(gateway_pid, 0)
-        except ProcessLookupError:
-            print("[restart_watcher] gateway exited, shutting down", flush=True)
-            sys.exit(0)
+        # Check for manual restart signal first.
+        if os.path.exists(SIGNAL_FILE):
+            try:
+                msg = open(SIGNAL_FILE).read().strip()
+            except OSError:
+                msg = ""
+            try:
+                os.remove(SIGNAL_FILE)
+            except OSError:
+                pass
 
-        if not os.path.exists(SIGNAL_FILE):
-            continue
-
-        # Read optional message then remove signal file
-        try:
-            msg = open(SIGNAL_FILE).read().strip()
-        except OSError:
-            msg = ""
-        try:
-            os.remove(SIGNAL_FILE)
-        except OSError:
-            pass
-
-        if msg:
-            print(f"[restart_watcher] restart requested: {msg}", flush=True)
-        else:
-            print("[restart_watcher] restart signal received", flush=True)
-
-        # Terminate the current gateway gracefully, then force-kill if needed
-        try:
-            os.kill(gateway_pid, signal.SIGTERM)
-            for _ in range(10):
-                time.sleep(0.5)
-                try:
-                    os.kill(gateway_pid, 0)  # check if still alive
-                except ProcessLookupError:
-                    break
+            if msg:
+                print(f"[restart_watcher] restart requested: {msg}", flush=True)
             else:
+                print("[restart_watcher] restart signal received", flush=True)
+
+            # Kill current gateway if still running.
+            if _is_alive(gateway_pid):
                 try:
-                    os.kill(gateway_pid, signal.SIGKILL)
+                    os.kill(gateway_pid, signal.SIGTERM)
+                    for _ in range(10):
+                        time.sleep(0.5)
+                        if not _is_alive(gateway_pid):
+                            break
+                    else:
+                        try:
+                            os.kill(gateway_pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
                 except ProcessLookupError:
                     pass
-        except ProcessLookupError:
-            pass  # already dead
 
-        print(f"[restart_watcher] starting: {' '.join(gateway_cmd)}", flush=True)
-        proc = subprocess.Popen(gateway_cmd, start_new_session=True)
-        gateway_pid = proc.pid
-        print(f"[restart_watcher] new gateway PID {gateway_pid}", flush=True)
+            proc = subprocess.Popen(gateway_cmd, start_new_session=True)
+            gateway_pid = proc.pid
+            print(f"[restart_watcher] new gateway PID {gateway_pid}", flush=True)
+            continue
+
+        # Restart gateway if it crashed.
+        if not _is_alive(gateway_pid):
+            print("[restart_watcher] gateway crashed, restarting...", flush=True)
+            proc = subprocess.Popen(gateway_cmd, start_new_session=True)
+            gateway_pid = proc.pid
+            print(f"[restart_watcher] new gateway PID {gateway_pid}", flush=True)
 
 
 if __name__ == "__main__":
     main()
+
