@@ -585,6 +585,9 @@ class FeishuChannel(BaseChannel):
             if msg_type == "post":
                 text, _ = _extract_post_content(parsed)
                 return text.strip() or None
+            if msg_type in ("interactive", "share_chat", "share_user", "share_calendar_event"):
+                text = _extract_share_card_content(parsed, msg_type)
+                return text.strip() or None
             # For other types return a placeholder
             return MSG_TYPE_MAP.get(msg_type, f"[{msg_type}]")
         except Exception as e:
@@ -919,15 +922,16 @@ class FeishuChannel(BaseChannel):
             logger.error("Error uploading file {}: {}", file_path, e)
             return None
 
-    def _download_image_sync(self, message_id: str, image_key: str) -> tuple[bytes | None, str | None]:
+    def _download_image_sync(self, message_id: str, image_key: str, account_id: str | None = None) -> tuple[bytes | None, str | None]:
         """Download an image from Feishu message by message_id and image_key."""
         try:
+            client = self._clients.get(account_id) if account_id and self._clients else self._client
             request = GetMessageResourceRequest.builder() \
                 .message_id(message_id) \
                 .file_key(image_key) \
                 .type("image") \
                 .build()
-            response = self._client.im.v1.message_resource.get(request)
+            response = client.im.v1.message_resource.get(request)
             if response.success():
                 file_data = response.file
                 # GetMessageResourceRequest returns BytesIO, need to read bytes
@@ -942,10 +946,11 @@ class FeishuChannel(BaseChannel):
             return None, None
 
     def _download_file_sync(
-        self, message_id: str, file_key: str, resource_type: str = "file"
+        self, message_id: str, file_key: str, resource_type: str = "file", account_id: str | None = None
     ) -> tuple[bytes | None, str | None]:
         """Download a file/audio/media from a Feishu message by message_id and file_key."""
         try:
+            client = self._clients.get(account_id) if account_id and self._clients else self._client
             request = (
                 GetMessageResourceRequest.builder()
                 .message_id(message_id)
@@ -953,7 +958,7 @@ class FeishuChannel(BaseChannel):
                 .type(resource_type)
                 .build()
             )
-            response = self._client.im.v1.message_resource.get(request)
+            response = client.im.v1.message_resource.get(request)
             if response.success():
                 file_data = response.file
                 if hasattr(file_data, "read"):
@@ -970,7 +975,8 @@ class FeishuChannel(BaseChannel):
         self,
         msg_type: str,
         content_json: dict,
-        message_id: str | None = None
+        message_id: str | None = None,
+        account_id: str | None = None,
     ) -> tuple[str | None, str]:
         """
         Download media from Feishu and save to local disk.
@@ -988,7 +994,7 @@ class FeishuChannel(BaseChannel):
             image_key = content_json.get("image_key")
             if image_key and message_id:
                 data, filename = await loop.run_in_executor(
-                    None, self._download_image_sync, message_id, image_key
+                    None, self._download_image_sync, message_id, image_key, account_id
                 )
                 if not filename:
                     filename = f"{image_key[:16]}.jpg"
@@ -997,7 +1003,7 @@ class FeishuChannel(BaseChannel):
             file_key = content_json.get("file_key")
             if file_key and message_id:
                 data, filename = await loop.run_in_executor(
-                    None, self._download_file_sync, message_id, file_key, msg_type
+                    None, self._download_file_sync, message_id, file_key, msg_type, account_id
                 )
                 if not filename:
                     ext = {"audio": ".opus", "media": ".mp4"}.get(msg_type, "")
@@ -1204,14 +1210,14 @@ class FeishuChannel(BaseChannel):
                 # Download images embedded in post
                 for img_key in image_keys:
                     file_path, content_text = await self._download_and_save_media(
-                        "image", {"image_key": img_key}, message_id
+                        "image", {"image_key": img_key}, message_id, account_id
                     )
                     if file_path:
                         media_paths.append(file_path)
                     content_parts.append(content_text)
 
             elif msg_type in ("image", "audio", "file", "media"):
-                file_path, content_text = await self._download_and_save_media(msg_type, content_json, message_id)
+                file_path, content_text = await self._download_and_save_media(msg_type, content_json, message_id, account_id)
                 if file_path:
                     media_paths.append(file_path)
                 content_parts.append(content_text)
