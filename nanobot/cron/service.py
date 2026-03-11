@@ -205,17 +205,22 @@ class CronService:
                  if j.enabled and j.state.next_run_at_ms]
         return min(times) if times else None
 
+    _POLL_INTERVAL_S = 60  # Poll for externally-added jobs when no jobs are scheduled
+
     def _arm_timer(self) -> None:
         """Schedule the next timer tick."""
         if self._timer_task:
             self._timer_task.cancel()
 
-        next_wake = self._get_next_wake_ms()
-        if not next_wake or not self._running:
+        if not self._running:
             return
 
-        delay_ms = max(0, next_wake - _now_ms())
-        delay_s = delay_ms / 1000
+        next_wake = self._get_next_wake_ms()
+        if next_wake:
+            delay_s = max(0, next_wake - _now_ms()) / 1000
+        else:
+            # No jobs scheduled — poll periodically so externally-added jobs are picked up.
+            delay_s = self._POLL_INTERVAL_S
 
         async def tick():
             await asyncio.sleep(delay_s)
