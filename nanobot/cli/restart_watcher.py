@@ -28,6 +28,15 @@ def main() -> None:
 
     while True:
         time.sleep(CHECK_INTERVAL)
+
+        # Exit if the gateway process died on its own (not via signal file).
+        # This prevents watcher processes from accumulating across manual restarts.
+        try:
+            os.kill(gateway_pid, 0)
+        except ProcessLookupError:
+            print("[restart_watcher] gateway exited, shutting down", flush=True)
+            sys.exit(0)
+
         if not os.path.exists(SIGNAL_FILE):
             continue
 
