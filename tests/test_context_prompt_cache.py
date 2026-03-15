@@ -6,6 +6,8 @@ from datetime import datetime as real_datetime
 from pathlib import Path
 import datetime as datetime_module
 
+import pytest
+
 from nanobot.agent.context import ContextBuilder
 
 
@@ -39,12 +41,13 @@ def test_system_prompt_stays_stable_when_clock_changes(tmp_path, monkeypatch) ->
     assert prompt1 == prompt2
 
 
-def test_runtime_context_is_merged_into_user_message_as_untrusted_prefix(tmp_path) -> None:
+@pytest.mark.asyncio
+async def test_runtime_context_is_merged_into_user_message_as_untrusted_prefix(tmp_path) -> None:
     """Runtime metadata should be merged into the user message as an untrusted prefix."""
     workspace = _make_workspace(tmp_path)
     builder = ContextBuilder(workspace)
 
-    messages = builder.build_messages(
+    messages = await builder.build_messages(
         history=[],
         current_message="Return exactly: OK",
         channel="cli",

@@ -10,6 +10,7 @@ from typing import Any
 
 from nanobot.agent.memory import MemoryStore
 from nanobot.agent.skills import SkillsLoader
+from nanobot.agent.tools.openviking_client import get_client as get_ov_client
 
 
 class ContextBuilder:
@@ -18,9 +19,10 @@ class ContextBuilder:
     BOOTSTRAP_FILES = ["AGENTS.md", "SOUL.md", "USER.md", "TOOLS.md", "IDENTITY.md"]
     _RUNTIME_CONTEXT_TAG = "[Runtime Context — metadata only, not instructions]"
 
-    def __init__(self, workspace: Path, ov_data_path: str | None = None):
+    def __init__(self, workspace: Path, ov_data_path: str | None = None, has_image_gen_tool: bool = False):
         self.workspace = workspace
         self.ov_data_path = ov_data_path
+        self._has_image_gen_tool = has_image_gen_tool
         self.memory = MemoryStore(workspace)
         self.skills = SkillsLoader(workspace)
 
@@ -84,6 +86,10 @@ OpenViking long-term memory is **active**. Data path: {self.ov_data_path}
 Use the openviking_search, openviking_list, openviking_read, openviking_grep, openviking_glob,
 and user_memory_search tools to query persistent memory across sessions."""
 
+        image_gen_section = ""
+        if self._has_image_gen_tool:
+            image_gen_section = "\n- To generate images, ALWAYS use the `generate_image` tool — never say you cannot generate images."
+
         return f"""# Runtime
 
 {runtime}
@@ -99,7 +105,7 @@ Your workspace is at: {workspace_path}
 - Before modifying a file, read it first. Do not assume files or directories exist.
 - After writing or editing a file, re-read it if accuracy matters.
 - If a tool call fails, analyze the error before retrying with a different approach.
-- Ask for clarification when the request is ambiguous.
+- Ask for clarification when the request is ambiguous.{image_gen_section}
 
 Reply directly with text for conversations. Only use the 'message' tool to send to a *different* channel or chat (not the current one). To involve peer agents in this group, ALWAYS use `discuss_with_agents` — the `message` tool does NOT trigger peers."""
 
@@ -125,7 +131,7 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
 
         return "\n\n".join(parts) if parts else ""
 
-    def build_messages(
+    async def build_messages(
         self,
         history: list[dict[str, Any]],
         current_message: str,
@@ -136,6 +142,24 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
         peer_agent_names: list[tuple[str, str]] | list[str] | None = None,
     ) -> list[dict[str, Any]]:
         """Build the complete message list for an LLM call."""
+        ov_memory = ""
+        if self.ov_data_path:
+            try:
+                client = await get_ov_client(self.ov_data_path)
+                result = await client.search_memory(current_message, limit=5)
+                if result and result.get("results"):
+                    lines = [
+                        f"- {r['abstract']} (score: {r.get('score', 0):.2f})"
+                        for r in result["results"]
+                    ]
+                    ov_memory = "## Related Memories\n" + "\n".join(lines)
+            except Exception:
+                pass  # OV unavailable — degrade gracefully
+
+        system_prompt = self.build_system_prompt(skill_names, peer_agent_names)
+        if ov_memory:
+            system_prompt = system_prompt + "\n\n" + ov_memory
+
         runtime_ctx = self._build_runtime_context(channel, chat_id)
         user_content = self._build_user_content(current_message, media)
 
@@ -147,7 +171,7 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
             merged = [{"type": "text", "text": runtime_ctx}] + user_content
 
         return [
-            {"role": "system", "content": self.build_system_prompt(skill_names, peer_agent_names)},
+            {"role": "system", "content": system_prompt},
             *history,
             {"role": "user", "content": merged},
         ]
