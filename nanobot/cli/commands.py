@@ -351,67 +351,64 @@ def gateway(
             provider_name=provider_name,
         )
 
-    # Create cron service first (callback set after agent pool creation)
-    cron_store_path = get_data_dir() / "cron" / "jobs.json"
-    cron = CronService(cron_store_path)
-
     # Create agent pool
     agent_pool = AgentPool(config, bus, provider_factory)
 
-    # Assign cron service to all agents
-    for agent in agent_pool._agents.values():
-        agent.cron_service = cron
+    # Create per-agent cron services, each scoped to the agent's workspace.
+    # This ensures jobs written to {workspace}/cron/jobs.json are picked up.
+    def _make_cron_callback(bound_agent):
+        async def on_cron_job(job: CronJob) -> str | None:
+            from nanobot.agent.tools.cron import CronTool
+            from nanobot.agent.tools.message import MessageTool
 
-    # Set cron callback (uses default agent for backward compatibility)
-    async def on_cron_job(job: CronJob) -> str | None:
-        """Execute a cron job through the agent."""
-        from nanobot.agent.tools.cron import CronTool
-        from nanobot.agent.tools.message import MessageTool
-
-        # Get default agent or first available agent
-        agent = agent_pool.get_default_agent()
-        if agent is None and agent_pool._agents:
-            agent = next(iter(agent_pool._agents.values()))
-
-        if agent is None:
-            console.print("[red]Error: No agent available for cron job[/red]")
-            return None
-
-        reminder_note = (
-            "[Scheduled Task] Timer finished.\n\n"
-            f"Task '{job.name}' has been triggered.\n"
-            f"Scheduled instruction: {job.payload.message}"
-        )
-
-        # Prevent the agent from scheduling new cron jobs during execution
-        cron_tool = agent.tools.get("cron")
-        cron_token = None
-        if isinstance(cron_tool, CronTool):
-            cron_token = cron_tool.set_cron_context(True)
-        try:
-            response = await agent.process_direct(
-                reminder_note,
-                session_key=f"cron:{job.id}",
-                channel=job.payload.channel or "cli",
-                chat_id=job.payload.to or "direct",
+            reminder_note = (
+                "[Scheduled Task] Timer finished.\n\n"
+                f"Task '{job.name}' has been triggered.\n"
+                f"Scheduled instruction: {job.payload.message}"
             )
-        finally:
-            if isinstance(cron_tool, CronTool) and cron_token is not None:
-                cron_tool.reset_cron_context(cron_token)
 
-        message_tool = agent.tools.get("message")
-        if isinstance(message_tool, MessageTool) and message_tool._sent_in_turn:
+            cron_tool = bound_agent.tools.get("cron")
+            cron_token = None
+            if isinstance(cron_tool, CronTool):
+                cron_token = cron_tool.set_cron_context(True)
+            try:
+                response = await bound_agent.process_direct(
+                    reminder_note,
+                    session_key=f"cron:{job.id}",
+                    channel=job.payload.channel or "cli",
+                    chat_id=job.payload.to or "direct",
+                )
+            finally:
+                if isinstance(cron_tool, CronTool) and cron_token is not None:
+                    cron_tool.reset_cron_context(cron_token)
+
+            message_tool = bound_agent.tools.get("message")
+            if isinstance(message_tool, MessageTool) and message_tool._sent_in_turn:
+                return response
+
+            if job.payload.deliver and job.payload.to and response:
+                from nanobot.bus.events import OutboundMessage
+                await bus.publish_outbound(OutboundMessage(
+                    channel=job.payload.channel or "cli",
+                    chat_id=job.payload.to,
+                    content=response
+                ))
             return response
+        return on_cron_job
 
-        if job.payload.deliver and job.payload.to and response:
-            from nanobot.bus.events import OutboundMessage
-            await bus.publish_outbound(OutboundMessage(
-                channel=job.payload.channel or "cli",
-                chat_id=job.payload.to,
-                content=response
-            ))
-        return response
-    cron.on_job = on_cron_job
+    cron_services: list[CronService] = []
+    for agent in agent_pool._agents.values():
+        agent_cron_path = agent.workspace / "cron" / "jobs.json"
+        agent_cron = CronService(agent_cron_path)
+        agent_cron.on_job = _make_cron_callback(agent)
+        agent.cron_service = agent_cron
+        cron_services.append(agent_cron)
+
+    # Fallback: single cron service for the default workspace (used by `serve` and single-agent setups)
+    if not cron_services:
+        cron_store_path = get_data_dir() / "cron" / "jobs.json"
+        fallback_cron = CronService(cron_store_path)
+        cron_services.append(fallback_cron)
 
     # Create channel manager with agent pool
     channels = ChannelManager(config, bus, agent_pool)
@@ -496,15 +493,16 @@ def gateway(
     else:
         console.print("[yellow]Warning: No channels enabled[/yellow]")
 
-    cron_status = cron.status()
-    if cron_status["jobs"] > 0:
-        console.print(f"[green]✓[/green] Cron: {cron_status['jobs']} scheduled jobs")
+    total_jobs = sum(s.status()["jobs"] for s in cron_services)
+    if total_jobs > 0:
+        console.print(f"[green]✓[/green] Cron: {total_jobs} scheduled jobs")
 
     console.print(f"[green]✓[/green] Heartbeat: every {hb_cfg.interval_s}s")
 
     async def run():
         try:
-            await cron.start()
+            for svc in cron_services:
+                await svc.start()
             await heartbeat.start()
             # Run all agents in the pool
             agent_tasks = [agent.run() for agent in agent_pool._agents.values()]
@@ -521,17 +519,27 @@ def gateway(
                 await agent.close_mcp()
                 agent.stop()
             heartbeat.stop()
-            cron.stop()
+            for svc in cron_services:
+                svc.stop()
             await channels.stop_all()
 
-    # Kill any previous restart_watcher before spawning a new one.
-    # Without this, each manual restart accumulates a new watcher process.
+    # Kill any previous gateway and restart_watcher before spawning a new one.
+    # Without this, each manual restart accumulates stale gateway + watcher processes.
+    import signal as _signal
     _watcher_pid_file = "/tmp/nanobot_watcher.pid"
+    _gateway_pid_file = "/tmp/nanobot_gateway.pid"
+    for _pid_file in (_gateway_pid_file, _watcher_pid_file):
+        try:
+            _prev_pid = int(open(_pid_file).read().strip())
+            if _prev_pid != os.getpid():
+                os.kill(_prev_pid, _signal.SIGTERM)
+        except (OSError, ValueError, ProcessLookupError):
+            pass
+    # Write our own PID so the next launch can kill us.
     try:
-        _prev_pid = int(open(_watcher_pid_file).read().strip())
-        import signal as _signal
-        os.kill(_prev_pid, _signal.SIGTERM)
-    except (OSError, ValueError, ProcessLookupError):
+        with open(_gateway_pid_file, "w") as _f:
+            _f.write(str(os.getpid()))
+    except OSError:
         pass
 
     # Start restart watcher as an independent background process.
