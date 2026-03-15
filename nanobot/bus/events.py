@@ -1,7 +1,7 @@
 """Event types for the message bus."""
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 
 
@@ -21,7 +21,7 @@ class InboundMessage:
     @property
     def session_key(self) -> str:
         """Unique key for session identification."""
-        return self.session_key_override or f"{self.channel}:{self.chat_id}"
+        return self.session_key_override or f"{self.channel}:{self.chat_id}:{date.today()}"
 
 
 @dataclass
