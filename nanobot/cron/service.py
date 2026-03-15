@@ -72,6 +72,7 @@ class CronService:
         self.on_job = on_job
         self._store: CronStore | None = None
         self._last_mtime: float = 0.0
+        self._self_wrote: bool = False
         self._timer_task: asyncio.Task | None = None
         self._running = False
 
@@ -80,7 +81,9 @@ class CronService:
         if self._store and self.store_path.exists():
             mtime = self.store_path.stat().st_mtime
             if mtime != self._last_mtime:
-                logger.info("Cron: jobs.json modified externally, reloading")
+                if not self._self_wrote:
+                    logger.info("Cron: jobs.json modified externally, reloading")
+                self._self_wrote = False
                 self._store = None
         if self._store:
             return self._store
@@ -169,8 +172,13 @@ class CronService:
             ]
         }
 
-        self.store_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        # Write atomically: write to a temp file then rename, so a crash mid-write
+        # never leaves jobs.json empty or partially written.
+        _tmp = self.store_path.with_name(self.store_path.name + ".tmp")
+        _tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        _tmp.replace(self.store_path)
         self._last_mtime = self.store_path.stat().st_mtime
+        self._self_wrote = True
     
     async def start(self) -> None:
         """Start the cron service."""
