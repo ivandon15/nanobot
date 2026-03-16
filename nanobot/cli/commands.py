@@ -361,18 +361,23 @@ def gateway(
             from nanobot.agent.tools.cron import CronTool
             from nanobot.agent.tools.message import MessageTool
 
+            # Route to the agent specified in the payload, falling back to bound_agent.
+            target_agent = bound_agent
+            if job.payload.agent_id and job.payload.agent_id in agent_pool._agents:
+                target_agent = agent_pool._agents[job.payload.agent_id]
+
             reminder_note = (
                 "[Scheduled Task] Timer finished.\n\n"
                 f"Task '{job.name}' has been triggered.\n"
                 f"Scheduled instruction: {job.payload.message}"
             )
 
-            cron_tool = bound_agent.tools.get("cron")
+            cron_tool = target_agent.tools.get("cron")
             cron_token = None
             if isinstance(cron_tool, CronTool):
                 cron_token = cron_tool.set_cron_context(True)
             try:
-                response = await bound_agent.process_direct(
+                response = await target_agent.process_direct(
                     reminder_note,
                     session_key=f"cron:{job.id}",
                     channel=job.payload.channel or "cli",
@@ -382,7 +387,7 @@ def gateway(
                 if isinstance(cron_tool, CronTool) and cron_token is not None:
                     cron_tool.reset_cron_context(cron_token)
 
-            message_tool = bound_agent.tools.get("message")
+            message_tool = target_agent.tools.get("message")
             if isinstance(message_tool, MessageTool) and message_tool._sent_in_turn:
                 return response
 
@@ -402,6 +407,10 @@ def gateway(
         agent_cron = CronService(agent_cron_path)
         agent_cron.on_job = _make_cron_callback(agent)
         agent.cron_service = agent_cron
+        # Register CronTool now that cron_service is available (it was None at __init__ time)
+        from nanobot.agent.tools.cron import CronTool as _CronTool
+        if agent.tools.get("cron") is None:
+            agent.tools.register(_CronTool(agent_cron, agent_id=agent._agent_id))
         cron_services.append(agent_cron)
 
     # Fallback: single cron service for the default workspace (used by `serve` and single-agent setups)
@@ -995,9 +1004,10 @@ def cron_add(
     deliver: bool = typer.Option(False, "--deliver", "-d", help="Deliver response to channel"),
     to: str = typer.Option(None, "--to", help="Recipient for delivery"),
     channel: str = typer.Option(None, "--channel", help="Channel for delivery (e.g. 'telegram', 'whatsapp')"),
+    agent: str = typer.Option(None, "--agent", "-a", help="Agent ID to execute this job (e.g. 'operator', 'vp')"),
 ):
     """Add a scheduled job."""
-    from nanobot.config.loader import get_data_dir
+    from nanobot.config.loader import get_data_dir, load_config
     from nanobot.cron.service import CronService
     from nanobot.cron.types import CronSchedule
 
@@ -1018,7 +1028,22 @@ def cron_add(
         console.print("[red]Error: Must specify --every, --cron, or --at[/red]")
         raise typer.Exit(1)
 
-    store_path = get_data_dir() / "cron" / "jobs.json"
+    # Resolve store path: use agent's workspace if --agent specified, else global fallback
+    cfg = load_config()
+    store_path = None
+    if agent:
+        agent_cfg = next((a for a in cfg.agents.list if a.id == agent), None)
+        if agent_cfg is None:
+            console.print(f"[red]Error: agent '{agent}' not found in config[/red]")
+            raise typer.Exit(1)
+        workspace_str = agent_cfg.workspace or cfg.agents.defaults.workspace
+        from pathlib import Path as _Path
+        base = _Path(workspace_str).expanduser()
+        workspace = base.parent / f"{base.name}-{agent}"
+        store_path = workspace / "cron" / "jobs.json"
+    else:
+        store_path = get_data_dir() / "cron" / "jobs.json"
+
     service = CronService(store_path)
 
     try:
@@ -1029,6 +1054,7 @@ def cron_add(
             deliver=deliver,
             to=to,
             channel=channel,
+            agent_id=agent,
         )
     except ValueError as e:
         console.print(f"[red]Error: {e}[/red]")

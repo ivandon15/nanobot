@@ -11,8 +11,9 @@ from nanobot.cron.types import CronSchedule
 class CronTool(Tool):
     """Tool to schedule reminders and recurring tasks."""
 
-    def __init__(self, cron_service: CronService):
+    def __init__(self, cron_service: CronService, agent_id: str | None = None):
         self._cron = cron_service
+        self._agent_id = agent_id
         self._channel = ""
         self._chat_id = ""
         self._in_cron_context: ContextVar[bool] = ContextVar("cron_in_context", default=False)
@@ -136,6 +137,7 @@ class CronTool(Tool):
             deliver=True,
             channel=self._channel,
             to=self._chat_id,
+            agent_id=self._agent_id,
             delete_after_run=delete_after,
         )
         return f"Created job '{job.name}' (id: {job.id})"

@@ -100,21 +100,32 @@ class GenerateImageTool(Tool):
 
         try:
             data = response.json()
-            content = data["choices"][0]["message"]["content"]
+            message = data["choices"][0]["message"]
+            content = message.get("content")
+            images = message.get("images")
         except (KeyError, IndexError, ValueError) as e:
             return f"Error: Unexpected API response format: {e}"
 
-        # Extract base64 image from content parts
+        # Extract base64 image — OpenRouter puts images in message.images or message.content
         image_b64 = None
-        if isinstance(content, list):
+        # Check message.images first (OpenRouter Gemini image models)
+        if images and isinstance(images, list):
+            for part in images:
+                if part.get("type") == "image_url":
+                    url = part.get("image_url", {}).get("url", "")
+                    if url.startswith("data:image/") and "," in url:
+                        image_b64 = url.split(",", 1)[1]
+                        break
+        # Fallback: check content parts
+        if not image_b64 and isinstance(content, list):
             for part in content:
                 if part.get("type") == "image_url":
                     url = part.get("image_url", {}).get("url", "")
-                    if url.startswith("data:image/"):
-                        image_b64 = url.split(",", 1)[1] if "," in url else None
-                    break
-        elif isinstance(content, str) and content.startswith("data:image/"):
-            image_b64 = content.split(",", 1)[1] if "," in content else None
+                    if url.startswith("data:image/") and "," in url:
+                        image_b64 = url.split(",", 1)[1]
+                        break
+        elif not image_b64 and isinstance(content, str) and content.startswith("data:image/") and "," in content:
+            image_b64 = content.split(",", 1)[1]
 
         if not image_b64:
             return "Error: No image data found in API response. The model may not support image generation."

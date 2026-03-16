@@ -27,6 +27,7 @@ class CronPayload:
     deliver: bool = False
     channel: str | None = None  # e.g. "whatsapp"
     to: str | None = None  # e.g. phone number
+    agent_id: str | None = None  # which agent should execute this job
 
 
 @dataclass

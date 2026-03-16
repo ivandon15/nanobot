@@ -217,7 +217,7 @@ def _extract_post_content(content_json: dict) -> tuple[str, list[str]]:
                 elif tag == "img" and (key := el.get("image_key")):
                     images.append(key)
                 elif tag == "quote":
-                    # Recursively extract text from the nested quote block
+                    # Recursively extract text/code/image from the nested quote block
                     inner_content = el.get("content", [])
                     inner_texts = []
                     for inner_row in inner_content:
@@ -231,8 +231,16 @@ def _extract_post_content(content_json: dict) -> tuple[str, list[str]]:
                                 inner_texts.append(inner_el.get("text", ""))
                             elif inner_tag == "at":
                                 inner_texts.append(f"@{inner_el.get('user_name', 'user')}")
+                            elif inner_tag == "code":
+                                lang = inner_el.get("language", "")
+                                code_text = inner_el.get("text", "")
+                                if code_text:
+                                    inner_texts.append(f"```{lang}\n{code_text}\n```")
+                            elif inner_tag == "img":
+                                key = inner_el.get("image_key", "")
+                                inner_texts.append(f"[image:{key}]" if key else "[image]")
                     if inner_texts:
-                        quoted_text = " ".join(inner_texts).strip()
+                        quoted_text = " ".join(t for t in inner_texts if t).strip()
                         texts.append(f"[Quoted: {quoted_text}]")
         return (" ".join(texts).strip() or None), images
 
