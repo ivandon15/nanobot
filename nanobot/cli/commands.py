@@ -279,6 +279,60 @@ def _make_provider(config: Config):
 # ============================================================================
 
 
+def _make_cron_callback_for_test(bound_agent, agent_pool, bus):
+    """Build a cron job callback for the given agent. Extracted for testability."""
+    async def on_cron_job(job) -> str | None:
+        from nanobot.agent.tools.cron import CronTool
+        from nanobot.agent.tools.message import MessageTool
+        from nanobot.bus.events import OutboundMessage
+
+        # Route to the agent specified in the payload, falling back to bound_agent.
+        target_agent = bound_agent
+        if job.payload.agent_id and job.payload.agent_id in agent_pool._agents:
+            target_agent = agent_pool._agents[job.payload.agent_id]
+
+        # Use the executing agent's id as account_id so the correct channel bot
+        # account is used when sending messages (e.g. Operator bot vs VP bot).
+        account_id = target_agent._agent_id
+        inbound_meta = {"account_id": account_id}
+
+        reminder_note = (
+            "[Scheduled Task] Timer finished.\n\n"
+            f"Task '{job.name}' has been triggered.\n"
+            f"Scheduled instruction: {job.payload.message}"
+        )
+
+        cron_tool = target_agent.tools.get("cron")
+        cron_token = None
+        if isinstance(cron_tool, CronTool):
+            cron_token = cron_tool.set_cron_context(True)
+        try:
+            response = await target_agent.process_direct(
+                reminder_note,
+                session_key=f"cron:{job.id}",
+                channel=job.payload.channel or "cli",
+                chat_id=job.payload.to or "direct",
+                inbound_metadata=inbound_meta,
+            )
+        finally:
+            if isinstance(cron_tool, CronTool) and cron_token is not None:
+                cron_tool.reset_cron_context(cron_token)
+
+        message_tool = target_agent.tools.get("message")
+        if isinstance(message_tool, MessageTool) and message_tool._sent_in_turn:
+            return response
+
+        if job.payload.deliver and job.payload.to and response:
+            await bus.publish_outbound(OutboundMessage(
+                channel=job.payload.channel or "cli",
+                chat_id=job.payload.to,
+                content=response,
+                metadata={"account_id": account_id},
+            ))
+        return response
+    return on_cron_job
+
+
 @app.command()
 def gateway(
     port: int = typer.Option(18790, "--port", "-p", help="Gateway port"),
@@ -357,49 +411,7 @@ def gateway(
     # Create per-agent cron services, each scoped to the agent's workspace.
     # This ensures jobs written to {workspace}/cron/jobs.json are picked up.
     def _make_cron_callback(bound_agent):
-        async def on_cron_job(job: CronJob) -> str | None:
-            from nanobot.agent.tools.cron import CronTool
-            from nanobot.agent.tools.message import MessageTool
-
-            # Route to the agent specified in the payload, falling back to bound_agent.
-            target_agent = bound_agent
-            if job.payload.agent_id and job.payload.agent_id in agent_pool._agents:
-                target_agent = agent_pool._agents[job.payload.agent_id]
-
-            reminder_note = (
-                "[Scheduled Task] Timer finished.\n\n"
-                f"Task '{job.name}' has been triggered.\n"
-                f"Scheduled instruction: {job.payload.message}"
-            )
-
-            cron_tool = target_agent.tools.get("cron")
-            cron_token = None
-            if isinstance(cron_tool, CronTool):
-                cron_token = cron_tool.set_cron_context(True)
-            try:
-                response = await target_agent.process_direct(
-                    reminder_note,
-                    session_key=f"cron:{job.id}",
-                    channel=job.payload.channel or "cli",
-                    chat_id=job.payload.to or "direct",
-                )
-            finally:
-                if isinstance(cron_tool, CronTool) and cron_token is not None:
-                    cron_tool.reset_cron_context(cron_token)
-
-            message_tool = target_agent.tools.get("message")
-            if isinstance(message_tool, MessageTool) and message_tool._sent_in_turn:
-                return response
-
-            if job.payload.deliver and job.payload.to and response:
-                from nanobot.bus.events import OutboundMessage
-                await bus.publish_outbound(OutboundMessage(
-                    channel=job.payload.channel or "cli",
-                    chat_id=job.payload.to,
-                    content=response
-                ))
-            return response
-        return on_cron_job
+        return _make_cron_callback_for_test(bound_agent, agent_pool, bus)
 
     cron_services: list[CronService] = []
     for agent in agent_pool._agents.values():
