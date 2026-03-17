@@ -32,12 +32,13 @@ def _is_alive(pid: int) -> bool:
 
 
 def main() -> None:
-    if len(sys.argv) < 3:
-        print("Usage: restart_watcher.py <gateway_pid> <cmd> [args...]", file=sys.stderr)
+    if len(sys.argv) < 4:
+        print("Usage: restart_watcher.py <gateway_pid> <log_file> <cmd> [args...]", file=sys.stderr)
         sys.exit(1)
 
     gateway_pid = int(sys.argv[1])
-    gateway_cmd = sys.argv[2:]
+    log_file = sys.argv[2]
+    gateway_cmd = sys.argv[3:]
 
     # Write own PID so the next gateway launch can kill us before spawning a replacement.
     try:
@@ -45,6 +46,10 @@ def main() -> None:
             f.write(str(os.getpid()))
     except OSError:
         pass
+
+    def _popen_gateway() -> subprocess.Popen:
+        log_fh = open(log_file, "a")
+        return subprocess.Popen(gateway_cmd, start_new_session=True, stdout=log_fh, stderr=log_fh)
 
     while True:
         time.sleep(CHECK_INTERVAL)
@@ -81,7 +86,7 @@ def main() -> None:
                 except ProcessLookupError:
                     pass
 
-            proc = subprocess.Popen(gateway_cmd, start_new_session=True)
+            proc = _popen_gateway()
             gateway_pid = proc.pid
             print(f"[restart_watcher] new gateway PID {gateway_pid}", flush=True)
             continue
@@ -89,7 +94,7 @@ def main() -> None:
         # Restart gateway if it crashed.
         if not _is_alive(gateway_pid):
             print("[restart_watcher] gateway crashed, restarting...", flush=True)
-            proc = subprocess.Popen(gateway_cmd, start_new_session=True)
+            proc = _popen_gateway()
             gateway_pid = proc.pid
             print(f"[restart_watcher] new gateway PID {gateway_pid}", flush=True)
 

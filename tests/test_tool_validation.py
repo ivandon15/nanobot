@@ -89,6 +89,38 @@ async def test_registry_returns_validation_error() -> None:
     assert "Invalid parameters" in result
 
 
+def test_validate_params_non_dict_input() -> None:
+    """validate_params should return an error for non-dict input, not crash."""
+    tool = SampleTool()
+    errors = tool.validate_params(["query", "hi"])  # type: ignore[arg-type]
+    assert errors and "object" in errors[0]
+
+
+def test_cast_params_string_to_integer() -> None:
+    """cast_params should coerce '5' -> 5 for integer schema fields."""
+    tool = SampleTool()
+    result = tool.cast_params({"query": "hi", "count": "5"})
+    assert result["count"] == 5
+    assert isinstance(result["count"], int)
+
+
+def test_cast_params_string_to_boolean() -> None:
+    """cast_params should coerce 'true'/'false' strings to bool."""
+    class BoolTool(Tool):
+        @property
+        def name(self) -> str: return "bool_tool"
+        @property
+        def description(self) -> str: return "bool tool"
+        @property
+        def parameters(self) -> dict[str, Any]:
+            return {"type": "object", "properties": {"flag": {"type": "boolean"}}, "required": ["flag"]}
+        async def execute(self, **kwargs: Any) -> str: return "ok"
+
+    tool = BoolTool()
+    assert tool.cast_params({"flag": "true"})["flag"] is True
+    assert tool.cast_params({"flag": "false"})["flag"] is False
+
+
 def test_exec_extract_absolute_paths_keeps_full_windows_path() -> None:
     cmd = r"type C:\user\workspace\txt"
     paths = ExecTool._extract_absolute_paths(cmd)

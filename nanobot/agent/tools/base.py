@@ -52,8 +52,49 @@ class Tool(ABC):
         """
         pass
 
+    def cast_params(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Apply safe schema-driven casts before validation (e.g. '5' -> 5 for integer fields)."""
+        schema = self.parameters or {}
+        if schema.get("type", "object") != "object":
+            return params
+        return self._cast_object(params, schema)
+
+    def _cast_object(self, obj: Any, schema: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(obj, dict):
+            return obj
+        props = schema.get("properties", {})
+        return {k: self._cast_value(v, props[k]) if k in props else v for k, v in obj.items()}
+
+    def _cast_value(self, val: Any, schema: dict[str, Any]) -> Any:
+        target = schema.get("type")
+        if target == "integer" and isinstance(val, str):
+            try:
+                return int(val)
+            except ValueError:
+                return val
+        if target == "number" and isinstance(val, str):
+            try:
+                return float(val)
+            except ValueError:
+                return val
+        if target == "string" and val is not None:
+            return str(val)
+        if target == "boolean" and isinstance(val, str):
+            if val.lower() in ("true", "1", "yes"):
+                return True
+            if val.lower() in ("false", "0", "no"):
+                return False
+        if target == "array" and isinstance(val, list):
+            item_schema = schema.get("items")
+            return [self._cast_value(item, item_schema) for item in val] if item_schema else val
+        if target == "object" and isinstance(val, dict):
+            return self._cast_object(val, schema)
+        return val
+
     def validate_params(self, params: dict[str, Any]) -> list[str]:
         """Validate tool parameters against JSON schema. Returns error list (empty if valid)."""
+        if not isinstance(params, dict):
+            return [f"parameters must be an object, got {type(params).__name__}"]
         schema = self.parameters or {}
         if schema.get("type", "object") != "object":
             raise ValueError(f"Schema must be object type, got {schema.get('type')!r}")

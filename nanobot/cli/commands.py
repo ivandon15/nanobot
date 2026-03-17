@@ -555,13 +555,15 @@ def gateway(
     # The watcher monitors /tmp/nanobot_restart and restarts the gateway when triggered.
     # It also auto-restarts the gateway if it crashes.
     import subprocess as _sp
+    _log_file = "/tmp/nanobot.log"
+    _log_fh = open(_log_file, "a")
     _watcher = _sp.Popen(
-        [sys.executable, "-m", "nanobot.cli.restart_watcher", str(os.getpid())] + sys.argv,
+        [sys.executable, "-m", "nanobot.cli.restart_watcher", str(os.getpid()), _log_file] + sys.argv,
         start_new_session=True,
-        stdout=_sp.DEVNULL,
-        stderr=_sp.DEVNULL,
+        stdout=_log_fh,
+        stderr=_log_fh,
     )
-    console.print(f"[green]✓[/green] Restart watcher started (PID {_watcher.pid})")
+    console.print(f"[green]✓[/green] Restart watcher started (PID {_watcher.pid}), logs → {_log_file}")
 
     asyncio.run(run())
 

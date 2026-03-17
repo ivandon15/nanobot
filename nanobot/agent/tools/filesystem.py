@@ -26,6 +26,8 @@ def _resolve_path(
 class ReadFileTool(Tool):
     """Tool to read file contents."""
 
+    _MAX_CHARS = 128_000
+
     def __init__(self, workspace: Path | None = None, allowed_dir: Path | None = None):
         self._workspace = workspace
         self._allowed_dir = allowed_dir
@@ -55,6 +57,9 @@ class ReadFileTool(Tool):
                 return f"Error: Not a file: {path}"
 
             content = file_path.read_text(encoding="utf-8")
+            if len(content) > self._MAX_CHARS:
+                content = content[: self._MAX_CHARS]
+                content += f"\n\n[truncated: file exceeds {self._MAX_CHARS} chars limit]"
             return content
         except PermissionError as e:
             return f"Error: {e}"

@@ -32,16 +32,9 @@ def _normalize(text: str) -> str:
 
 
 def _validate_url(url: str) -> tuple[bool, str]:
-    """Validate URL: must be http(s) with valid domain."""
-    try:
-        p = urlparse(url)
-        if p.scheme not in ('http', 'https'):
-            return False, f"Only http/https allowed, got '{p.scheme or 'none'}'"
-        if not p.netloc:
-            return False, "Missing domain"
-        return True, ""
-    except Exception as e:
-        return False, str(e)
+    """Validate URL with SSRF protection: scheme, domain, and resolved IP check."""
+    from nanobot.security.network import validate_url_target
+    return validate_url_target(url)
 
 
 class WebSearchTool(Tool):
